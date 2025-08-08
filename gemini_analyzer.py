@@ -3,12 +3,16 @@ Gemini AI integration for market analysis and signal generation
 """
 import json
 import logging
-import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
-from google import genai
-from google.genai import types
 from config import Config
+
+try:
+    from google import genai
+    from google.genai import types
+except Exception:  # Package may be missing or incompatible
+    genai = None
+    types = None
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +38,25 @@ class GeminiAnalyzer:
     """Gemini AI analyzer for trading signals"""
     
     def __init__(self):
-        self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
+        api_key = Config.GEMINI_API_KEY
         self.model = "gemini-2.5-pro"
+        self.client: Optional[Any] = None
+        if api_key and genai is not None:
+            try:
+                self.client = genai.Client(api_key=api_key)
+            except Exception as e:
+                logger.warning(f"Gemini client init failed: {e}. AI features disabled.")
+        else:
+            if not api_key:
+                logger.info("GEMINI_API_KEY not set. AI features disabled.")
+            if genai is None:
+                logger.info("google-genai package unavailable. AI features disabled.")
     
-    async def analyze_market_data(self, market_data: Dict) -> MarketAnalysis:
+    async def analyze_market_data(self, market_data: Dict[str, Any]) -> MarketAnalysis:
         """Analyze comprehensive market data"""
         try:
+            if not self.client or not types:
+                raise RuntimeError("Gemini client unavailable")
             system_prompt = """
             You are an expert cryptocurrency futures trader and analyst. 
             Analyze the provided market data and return a comprehensive market analysis.
@@ -83,7 +100,7 @@ class GeminiAnalyzer:
                 return MarketAnalysis(**data)
             else:
                 raise ValueError("Empty response from Gemini")
-                
+
         except Exception as e:
             logger.error(f"Error analyzing market data: {e}")
             # Return neutral analysis on error
@@ -95,9 +112,11 @@ class GeminiAnalyzer:
                 timeframe_analysis={tf: "Unable to analyze" for tf in Config.SUPPORTED_TIMEFRAMES}
             )
     
-    async def generate_trading_signal(self, symbol: str, market_data: Dict, analysis: MarketAnalysis) -> TradingSignal:
+    async def generate_trading_signal(self, symbol: str, market_data: Dict[str, Any], analysis: MarketAnalysis) -> TradingSignal:
         """Generate trading signal based on market analysis"""
         try:
+            if not self.client or not types:
+                raise RuntimeError("Gemini client unavailable")
             system_prompt = """
             You are an expert cryptocurrency futures trading signal generator.
             Based on the market data and analysis provided, generate a precise trading signal.
@@ -124,7 +143,7 @@ class GeminiAnalyzer:
             
             Market Data: {json.dumps(market_data, indent=2)}
             
-            Market Analysis: {json.dumps(analysis.dict(), indent=2)}
+            Market Analysis: {json.dumps(analysis.model_dump(), indent=2)}
             
             Consider these factors:
             1. Trend alignment across timeframes
@@ -152,7 +171,7 @@ class GeminiAnalyzer:
                 return TradingSignal(**data)
             else:
                 raise ValueError("Empty response from Gemini")
-                
+
         except Exception as e:
             logger.error(f"Error generating trading signal: {e}")
             # Return wait signal on error
@@ -163,30 +182,30 @@ class GeminiAnalyzer:
                 risk_level="HIGH"
             )
     
-    async def explain_market_conditions(self, symbol: str, market_data: Dict) -> str:
+    async def explain_market_conditions(self, symbol: str, market_data: Dict[str, Any]) -> str:
         """Provide detailed explanation of current market conditions"""
         try:
+            if not self.client:
+                raise RuntimeError("Gemini client unavailable")
             prompt = f"""
-            Provide a comprehensive but concise explanation of current market conditions for {symbol}.
+            Tulis penjelasan singkat (maks 250 kata) dalam Bahasa Indonesia tentang kondisi pasar saat ini untuk {symbol}.
+            Gunakan gaya bahasa yang ringkas, jelas, dan ramah trader.
+            Sertakan: tren, indikator kunci (funding, OI, volatilitas), level penting, dan risiko utama.
             
-            Market Data: {json.dumps(market_data, indent=2)}
-            
-            Explain in simple terms:
-            1. What the current trend looks like
-            2. What the indicators are suggesting
-            3. What traders should watch for
-            4. Key risk factors
-            
-            Keep it under 300 words and trader-friendly.
+            Data Pasar: {json.dumps(market_data, indent=2, ensure_ascii=False)}
             """
             
             response = self.client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt
             )
-            
-            return response.text or "Unable to analyze current market conditions."
+            text = (response.text or "")
+            # Pastikan output berbahasa Indonesia (fallback ringan jika model berbahasa Inggris)
+            if text and any(w in text.lower() for w in ["trend", "funding", "open interest", "resistance", "support"]):
+                text = text.replace("trend", "tren").replace("support", "support").replace("resistance", "resistensi")
+                text = text.replace("Open Interest", "Open Interest").replace("funding", "funding")
+            return text or "Tidak dapat menganalisis kondisi pasar saat ini."
             
         except Exception as e:
             logger.error(f"Error explaining market conditions: {e}")
-            return f"Error analyzing market conditions for {symbol}: {str(e)}"
+            return f"Gagal menganalisis kondisi pasar untuk {symbol}: {str(e)}"

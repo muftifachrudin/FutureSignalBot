@@ -9,5 +9,4 @@ dependencies = [
     "pydantic>=2.11.7",
     "python-telegram-bot>=22.3",
     "sift-stack-py>=0.8.2",
-    "telegram>=0.0.1",
 ]

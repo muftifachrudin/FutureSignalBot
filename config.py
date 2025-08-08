@@ -4,6 +4,13 @@ Configuration management for the trading signals bot
 import os
 from typing import Dict, List
 
+# Optional: load environment variables from a .env file if present
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
+
 class Config:
     """Configuration class for bot settings and API keys"""
     
@@ -21,7 +28,9 @@ class Config:
     
     # API endpoints
     COINGLASS_BASE_URL = "https://open-api-v4.coinglass.com/api"
-    MEXC_BASE_URL = "https://api.mexc.com"
+    MEXC_BASE_URL = "https://api.mexc.fm"
+    # MEXC Futures (Contract) public API base
+    MEXC_CONTRACT_BASE_URL = "https://contract.mexc.fm"
     
     # Rate limiting settings
     MAX_REQUESTS_PER_MINUTE = 60
@@ -35,20 +44,20 @@ class Config:
     @classmethod
     def validate(cls) -> bool:
         """Validate that all required API keys are present"""
-        required_keys = [
-            "TELEGRAM_BOT_TOKEN",
-            "MEXC_API_KEY", 
-            "MEXC_SECRET_KEY",
-            "COINGLASS_API_KEY",
-            "GEMINI_API_KEY"
-        ]
-        
-        for key in required_keys:
-            if not getattr(cls, key):
-                print(f"Missing required environment variable: {key}")
-                return False
-        return True
+        # Only Telegram token is strictly required to run the bot.
+        ok = True
+        if not getattr(cls, "TELEGRAM_BOT_TOKEN"):
+            print("Missing required environment variable: TELEGRAM_BOT_TOKEN")
+            ok = False
+        # Warn for optional keys
+        optional = ["MEXC_API_KEY", "MEXC_SECRET_KEY", "COINGLASS_API_KEY", "GEMINI_API_KEY"]
+        missing_optional = [k for k in optional if not getattr(cls, k)]
+        if missing_optional:
+            print(f"Warning: Missing optional environment variables: {', '.join(missing_optional)}")
+            print("Some features may be limited (e.g., AI analysis or extended market data).")
+        return ok
 
 # Validate configuration on import
 if not Config.validate():
-    raise ValueError("Missing required configuration. Please check your environment variables.")
+    # Fail fast only if Telegram token is missing; otherwise continue with reduced features.
+    raise ValueError("Missing TELEGRAM_BOT_TOKEN. Please set it and restart.")

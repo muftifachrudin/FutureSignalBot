@@ -2,28 +2,33 @@
 """
 Main entry point for the MEXC Futures Trading Signals Telegram Bot
 """
-import asyncio
 import logging
-import os
+from logging.handlers import RotatingFileHandler
 from bot import TradingSignalBot
 
 # Configure logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# Console logging
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# Rotating file logging (logs/bot.log)
+try:
+    import os
+    os.makedirs('logs', exist_ok=True)
+    file_handler = RotatingFileHandler('logs/bot.log', maxBytes=2_000_000, backupCount=3, encoding='utf-8')
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    file_handler.setLevel(logging.INFO)
+    logging.getLogger().addHandler(file_handler)
+except Exception as _e:
+    logging.getLogger(__name__).warning(f"File logging disabled: {_e}")
 logger = logging.getLogger(__name__)
 
-async def main():
-    """Main function to start the bot"""
+def main():
     try:
-        # Initialize and start the bot
         bot = TradingSignalBot()
-        await bot.start()
+        bot.run()
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
-        return
+        raise
 
 if __name__ == "__main__":
-    # Run the bot
-    asyncio.run(main())
+    main()
