@@ -2,7 +2,6 @@
 Utility functions for the trading bot
 """
 import time
-import json
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
 import logging
@@ -124,6 +123,9 @@ def format_signal_message(symbol: str, signal_data: Dict[str, Any]) -> str:
             open_interest = safe_get(coinglass_data, 'open_interest')
             long_short_ratio = safe_get(coinglass_data, 'long_short_ratio')
             oi_change = safe_get(coinglass_data, 'oi_change_24h')
+            liq_long = safe_get(coinglass_data, 'liquidations_long_usd')
+            liq_short = safe_get(coinglass_data, 'liquidations_short_usd')
+            fear_greed = safe_get(coinglass_data, 'fear_greed')
 
             message += "\n🔍 **Sentimen Pasar:**\n"
             if funding_rate is not None:
@@ -134,12 +136,39 @@ def format_signal_message(symbol: str, signal_data: Dict[str, Any]) -> str:
                 message += f"• Open Interest: {format_volume(open_interest)}\n"
 
             if oi_change is not None:
-                oi_emoji = '🟢' if oi_change > 0 else '🔴' if oi_change < 0 else '⚪'
-                message += f"• Perubahan OI 24j: {oi_emoji} {format_percentage(oi_change)}\n"
+                try:
+                    oi_val = float(oi_change)
+                except Exception:
+                    oi_val = 0.0
+                oi_emoji = '🟢' if oi_val > 0 else '🔴' if oi_val < 0 else '⚪'
+                # Coinglass OI change is already percent value, print directly with %
+                message += f"• Perubahan OI 24j: {oi_emoji} {oi_val:.2f}%\n"
 
             if long_short_ratio is not None:
-                ls_emoji = '🟢' if long_short_ratio > 0.6 else '🔴' if long_short_ratio < 0.4 else '⚪'
-                message += f"• Rasio Long/Short: {ls_emoji} {long_short_ratio:.2f}\n"
+                try:
+                    lsr = float(long_short_ratio)
+                except Exception:
+                    lsr = 0.0
+                ls_emoji = '🟢' if lsr > 0.6 else '🔴' if lsr < 0.4 else '⚪'
+                message += f"• Rasio Long/Short: {ls_emoji} {lsr:.2f}\n"
+
+            # Optional: liquidation totals and Fear & Greed
+            if liq_long is not None or liq_short is not None:
+                try:
+                    ll = float(liq_long or 0)
+                    ls = float(liq_short or 0)
+                    if ll or ls:
+                        message += f"• Likuidasi: Long ${format_volume(ll)} | Short ${format_volume(ls)}\n"
+                except Exception:
+                    pass
+
+            if fear_greed is not None:
+                try:
+                    fg = float(fear_greed)
+                    if fg > 0:
+                        message += f"• Fear & Greed: {fg:.0f}/100\n"
+                except Exception:
+                    pass
 
         message += (
             "\n💭 **Analisis:**\n" + escape_markdown(reasoning) + "\n"
@@ -247,14 +276,19 @@ def truncate_text(text: str, max_length: int = 4000) -> str:
     
     return text[:max_length - 3] + "..."
 
-from typing import Mapping
+from typing import Mapping, cast
 
 def safe_get(data: Mapping[str, Any], *keys: str, default: Any = None) -> Any:
     """Safely get nested dictionary values"""
     try:
+        cur: Any = data
         for key in keys:
-            data = data[key]
-        return data
+            if isinstance(cur, Mapping) and key in cur:
+                # Help type checkers understand the mapping access
+                cur = cast(Mapping[str, Any], cur)[key]  # type: ignore[index]
+            else:
+                return default
+        return cur
     except (KeyError, TypeError):
         return default
 

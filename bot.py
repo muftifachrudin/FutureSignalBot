@@ -1,61 +1,191 @@
 """
 Telegram bot implementation for trading signals (python-telegram-bot v22)
 """
+from __future__ import annotations
+
 import asyncio
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from signal_generator_v2 import ImprovedSignalGenerator
-from config import Config
-from utils import (
-    format_signal_message, format_market_analysis, format_pairs_list,
-    validate_symbol, format_error_message, get_timeframe_display, truncate_text
+import os
+from types import TracebackType
+from typing import Any, Dict, List, Optional, Protocol, Type, TypedDict, cast
+
+from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
 )
 
+from utils import (
+    format_error_message,
+    format_market_analysis,
+    format_pairs_list,
+    format_signal_message,
+    get_timeframe_display,
+    truncate_text,
+    validate_symbol,
+)
+
+# Initialize module-level logger
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Load configuration (fallbacks to environment variable if config module is unavailable)
+try:
+    from config import Config  # type: ignore
+except Exception:  # pragma: no cover - minimal fallback
+    class Config:  # type: ignore
+        TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+
+
+class TimeframeResult(TypedDict, total=False):
+    timeframe: str
+    trend: str
+    volatility: str
+    ema20: float
+    ema50: float
+    rsi: float
+    atrp: float
+    recommendation: str
+    score: float
+    explanation: str
+
+
+class SignalResult(TypedDict, total=False):
+    signal: str
+    confidence: float
+    reasoning: str
+    risk_level: str
+    entry_price: Optional[float]
+    stop_loss: Optional[float]
+    take_profit: Optional[float]
+    ai_analysis: str
+    market_data: Dict[str, Any]
+
+
+class SignalGeneratorProtocol(Protocol):
+    async def __aenter__(self) -> "SignalGeneratorProtocol": ...
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> Optional[bool]: ...
+
+    async def generate_signal(self, symbol: str, force: bool = False) -> Optional[SignalResult]: ...
+
+    async def get_supported_pairs(self) -> List[str]: ...
+
+    async def get_market_explanation(self, symbol: str) -> str: ...
+
+    async def analyze_timeframe(self, symbol: str, timeframe: str) -> Optional[TimeframeResult]: ...
+
+
+def _get_generator_class() -> Type[SignalGeneratorProtocol]:
+    """Return an async context manager class that implements the signal generator protocol.
+    Tries ImprovedSignalGenerator, then PairsCache from signal_generator_v2. Falls back to a stub.
+    """
+    try:
+        import signal_generator_v2 as _sg  # type: ignore
+
+        gen = getattr(_sg, "ImprovedSignalGenerator", None)
+        if gen is None:
+            gen = getattr(_sg, "PairsCache", None)
+        if gen is not None:
+            return cast(Type[SignalGeneratorProtocol], gen)
+    except Exception:
+        pass
+
+    class _StubGenerator:
+        async def __aenter__(self) -> "SignalGeneratorProtocol":
+            return cast(SignalGeneratorProtocol, self)
+
+        async def __aexit__(
+            self,
+            exc_type: Optional[Type[BaseException]],
+            exc: Optional[BaseException],
+            tb: Optional[TracebackType],
+        ) -> Optional[bool]:
+            return False
+
+        async def generate_signal(self, symbol: str, force: bool = False) -> Optional[SignalResult]:
+            return None
+
+        async def get_supported_pairs(self) -> List[str]:
+            return []
+
+        async def get_market_explanation(self, symbol: str) -> str:  # noqa: ARG002
+            return ""
+
+        async def analyze_timeframe(self, symbol: str, timeframe: str) -> Optional[TimeframeResult]:  # noqa: ARG002
+            return None
+
+    return cast(Type[SignalGeneratorProtocol], _StubGenerator)
+
+
+GeneratorClass: Type[SignalGeneratorProtocol] = _get_generator_class()
+
+
 class TradingSignalBot:
-    """Main Telegram bot class"""
+    def __init__(self) -> None:
+        self.token: str = Config.TELEGRAM_BOT_TOKEN
+        # Fully parameterize Application generics to avoid Unknown types from stubs
+        self.application: Optional[Application[Any, Any, Any, Any, Any, Any]] = None
+        self.signal_generator: Optional[SignalGeneratorProtocol] = None
 
-    def __init__(self):
-        self.token = Config.TELEGRAM_BOT_TOKEN
-        self.signal_generator = None
-        self.application = None
-
-    def run(self):
+    def run(self) -> None:
         """Run the bot using Application.run_polling (blocking)."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            self.signal_generator = loop.run_until_complete(self._enter_signal_generator())
+            logger.info("Starting Telegram bot (run_polling)...")
             self.application = Application.builder().token(self.token).build()
             self._add_handlers()
-            logger.info("Starting Telegram bot (run_polling)...")
+            # Initialize the signal generator context
+            self.signal_generator = loop.run_until_complete(self._enter_signal_generator())
+            assert self.application is not None
             self.application.run_polling(close_loop=False)
+        except Exception as e:
+            logger.exception(f"Bot encountered an error: {e}")
         finally:
-            if self.signal_generator:
-                loop.run_until_complete(self.signal_generator.__aexit__(None, None, None))
-            loop.close()
+            try:
+                if self.signal_generator:
+                    loop.run_until_complete(self.signal_generator.__aexit__(None, None, None))
+            except Exception as e:
+                logger.warning(f"Error during signal generator cleanup: {e}")
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
 
-    async def _enter_signal_generator(self) -> ImprovedSignalGenerator:
-        gen = ImprovedSignalGenerator()
+    async def _enter_signal_generator(self) -> SignalGeneratorProtocol:
+        gen = GeneratorClass()
         await gen.__aenter__()
         return gen
 
-    async def stop(self):
+    async def stop(self) -> None:
         try:
             if self.application:
                 await self.application.stop()
-            if self.signal_generator:
-                await self.signal_generator.__aexit__(None, None, None)
         except Exception as e:
             logger.warning(f"Error during bot stop: {e}")
+        finally:
+            if self.signal_generator:
+                try:
+                    await self.signal_generator.__aexit__(None, None, None)
+                except Exception as e2:
+                    logger.warning(f"Error during signal generator exit: {e2}")
 
-    def _add_handlers(self):
-        application = self.application
+    def _add_handlers(self) -> None:
+        application: Optional[Application[Any, Any, Any, Any, Any, Any]] = self.application
         if application is None:
             logger.warning("Application not initialized; cannot add handlers yet.")
             return
+        # Global error handler
+        application.add_error_handler(self.error_handler)
         application.add_handler(CommandHandler("start", self.start_command))
         application.add_handler(CommandHandler("help", self.help_command))
         application.add_handler(CommandHandler("signal", self.signal_command))
@@ -66,34 +196,29 @@ class TradingSignalBot:
         application.add_handler(CallbackQueryHandler(self.button_callback))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_symbol_message))
 
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:  # pragma: no cover
+        """Handle all unexpected errors to avoid noisy stack traces."""
+        try:
+            logger.error("Unhandled exception in Telegram handler", exc_info=context.error)
+            if isinstance(update, Update) and update.effective_message:
+                await update.effective_message.reply_text(
+                    "⚠️ Terjadi kesalahan tak terduga. Silakan coba lagi."
+                )
+        except Exception:
+            # Never raise inside the error handler
+            pass
+
     # Commands
-    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG002
         msg = update.effective_message
         if not msg:
             return
+        # Concise welcome like image 3
         welcome_message = (
             "\n".join([
                 "🤖 **Selamat datang di Bot Sinyal Perdagangan MEXC Futures!**",
                 "",
-                "Bot ini memberikan sinyal trading berbasis AI untuk futures MEXC menggunakan:",
-                "• 📊 Analisis multi-timeframe (5m, 15m, 30m, 1h, 4h)",
-                "• 📈 Data sentimen pasar dari Coinglass",
-                "• 🤖 Analisis AI Gemini (opsional)",
-                "• 💹 Data harga dari MEXC",
-                "",
-                "**Perintah yang tersedia:**",
-                "• `/signal <SYMBOL>` - Dapatkan sinyal trading",
-                "• `/analyze <SYMBOL>` - Analisis pasar",
-                "• `/pairs` - Daftar pasangan yang didukung",
-                "• `/timeframes` - Rentang waktu yang dianalisis",
-                "• `/help` - Bantuan rinci",
-                "• `/about` - Tentang bot",
-                "",
-                "**Contoh:**",
-                "• `/signal BTCUSDT` - Sinyal BTC",
-                "• `/analyze ETHUSDT` - Analisis ETH",
-                "",
-                "⚠️ **Disclaimer:** Sinyal hanya untuk edukasi. Lakukan riset sendiri dan kelola risiko dengan bijak.",
+                "Pilih menu di bawah untuk memulai:",
             ])
         )
         keyboard = [
@@ -104,7 +229,7 @@ class TradingSignalBot:
         ]
         await msg.reply_text(welcome_message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG002
         msg = update.effective_message
         if not msg:
             return
@@ -153,7 +278,7 @@ class TradingSignalBot:
         )
         await msg.reply_text(help_message, parse_mode='Markdown')
 
-    async def about_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def about_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG002
         msg = update.effective_message
         if not msg:
             return
@@ -202,7 +327,7 @@ class TradingSignalBot:
         )
         await msg.reply_text(about_message, parse_mode='Markdown')
 
-    async def timeframes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def timeframes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG002
         msg = update.effective_message
         if not msg:
             return
@@ -235,7 +360,7 @@ class TradingSignalBot:
         ]
         await msg.reply_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-    async def pairs_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def pairs_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG002
         msg = update.effective_message
         if not msg:
             return
@@ -253,7 +378,7 @@ class TradingSignalBot:
         else:
             await processing_msg.edit_text(format_error_message("Gagal memuat daftar pasangan."), parse_mode='Markdown')
 
-    async def signal_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def signal_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
         if not msg:
             return
@@ -271,7 +396,7 @@ class TradingSignalBot:
         assert self.signal_generator is not None
         signal = await self.signal_generator.generate_signal(symbol)
         if signal:
-            message = format_signal_message(symbol, signal) + f"\n\n{get_timeframe_display()}"
+            message = format_signal_message(symbol, cast(Dict[str, Any], signal)) + f"\n\n{get_timeframe_display()}"
             keyboard = [
                 [InlineKeyboardButton("🔄 Muat Ulang", callback_data=f"refresh_signal_{symbol}")],
                 [InlineKeyboardButton("📊 Analisis Pasar", callback_data=f"analyze_{symbol}")],
@@ -281,7 +406,7 @@ class TradingSignalBot:
         else:
             await processing_msg.edit_text(format_error_message("Gagal membuat sinyal.", symbol), parse_mode='Markdown')
 
-    async def analyze_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def analyze_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
         if not msg:
             return
@@ -309,7 +434,7 @@ class TradingSignalBot:
         else:
             await processing_msg.edit_text(format_error_message("Gagal menganalisis kondisi pasar.", symbol), parse_mode='Markdown')
 
-    async def handle_symbol_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_symbol_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG002
         msg = update.effective_message
         if not msg or not msg.text:
             return
@@ -332,7 +457,7 @@ class TradingSignalBot:
         )
 
     # Callback router
-    async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG002
         query = update.callback_query
         if not query:
             return
@@ -376,7 +501,7 @@ class TradingSignalBot:
             await query.edit_message_text("❌ An error occurred. Please try again.")
 
     # Callback helpers
-    async def _render_main_menu(self, query: CallbackQuery):
+    async def _render_main_menu(self, query: CallbackQuery) -> None:
         welcome_message = (
             "\n".join([
                 "🤖 **Selamat datang di Bot Sinyal Perdagangan MEXC Futures!**",
@@ -392,12 +517,12 @@ class TradingSignalBot:
         ]
         await query.edit_message_text(welcome_message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-    async def _handle_popular_pairs(self, query: CallbackQuery):
+    async def _handle_popular_pairs(self, query: CallbackQuery) -> None:
         popular_pairs = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT", "DOTUSDT"]
         message = "🔥 **Pasangan Populer**\n\nPilih pasangan untuk mendapatkan sinyal:\n\n"
-        keyboard = []
+        keyboard: List[List[InlineKeyboardButton]] = []
         for i in range(0, len(popular_pairs), 2):
-            row = []
+            row: List[InlineKeyboardButton] = []
             for j in range(2):
                 if i + j < len(popular_pairs):
                     pair = popular_pairs[i + j]
@@ -406,7 +531,7 @@ class TradingSignalBot:
         keyboard.append([InlineKeyboardButton("📋 Semua Pasangan", callback_data="refresh_pairs")])
         await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-    async def _handle_get_signal_prompt(self, query: CallbackQuery):
+    async def _handle_get_signal_prompt(self, query: CallbackQuery) -> None:
         message = (
             "\n".join([
                 "🎯 **Dapatkan Sinyal**",
@@ -424,7 +549,7 @@ class TradingSignalBot:
         keyboard = [[InlineKeyboardButton("🔥 Pasangan Populer", callback_data="popular_pairs")]]
         await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-    async def _handle_timeframe_select(self, query: CallbackQuery, timeframe: str):
+    async def _handle_timeframe_select(self, query: CallbackQuery, timeframe: str) -> None:
         message = (
             "\n".join([
                 f"⏰ Timeframe dipilih: **{timeframe}**",
@@ -433,8 +558,8 @@ class TradingSignalBot:
             ])
         )
         popular_pairs = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "ADAUSDT", "XRPUSDT"]
-        keyboard = []
-        row = []
+        keyboard: List[List[InlineKeyboardButton]] = []
+        row: List[InlineKeyboardButton] = []
         for i, p in enumerate(popular_pairs, start=1):
             row.append(InlineKeyboardButton(p, callback_data=f"tf_analyze_{timeframe}_{p}"))
             if i % 3 == 0:
@@ -445,7 +570,7 @@ class TradingSignalBot:
         keyboard.append([InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")])
         await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-    async def _handle_timeframe_analyze(self, query: CallbackQuery, timeframe: str, symbol: str):
+    async def _handle_timeframe_analyze(self, query: CallbackQuery, timeframe: str, symbol: str) -> None:
         await query.edit_message_text(
             f"🔍 **Analisis {symbol} ({timeframe})...**\n\nMenghitung indikator (EMA/RSI/ATR) dan rekomendasi...",
             parse_mode='Markdown'
@@ -462,9 +587,9 @@ class TradingSignalBot:
             lines = [
                 f"⏰ Timeframe: {result.get('timeframe')} | Simbol: {symbol}",
                 f"📈 Tren: {result.get('trend')} | Volatilitas: {result.get('volatility')}",
-                f"EMA20: {result.get('ema20'):.4f} | EMA50: {result.get('ema50'):.4f}",
-                f"RSI(14): {result.get('rsi'):.2f} | ATR%: {result.get('atrp'):.2f}%",
-                f"🤖 Rekomendasi: {result.get('recommendation')} | Skor: {result.get('score'):.2f}",
+                f"EMA20: {float(result.get('ema20', 0.0)):.4f} | EMA50: {float(result.get('ema50', 0.0)):.4f}",
+                f"RSI(14): {float(result.get('rsi', 0.0)):.2f} | ATR%: {float(result.get('atrp', 0.0)):.2f}%",
+                f"🤖 Rekomendasi: {result.get('recommendation')} | Skor: {float(result.get('score', 0.0)):.2f}",
             ]
             summary = "\n".join(lines)
             explanation = result.get('explanation') or ""
@@ -488,7 +613,7 @@ class TradingSignalBot:
                 parse_mode='Markdown'
             )
 
-    async def _handle_market_analysis_prompt(self, query: CallbackQuery):
+    async def _handle_market_analysis_prompt(self, query: CallbackQuery) -> None:
         message = (
             "\n".join([
                 "📊 **Analisis Pasar**",
@@ -506,7 +631,7 @@ class TradingSignalBot:
         keyboard = [[InlineKeyboardButton("🔥 Pasangan Populer", callback_data="popular_pairs")]]
         await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-    async def _handle_help_callback(self, query: CallbackQuery):
+    async def _handle_help_callback(self, query: CallbackQuery) -> None:
         help_message = (
             "\n".join([
                 "📚 **Bantuan Cepat**",
@@ -537,7 +662,7 @@ class TradingSignalBot:
         ]
         await query.edit_message_text(help_message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-    async def _handle_signal_callback(self, query: CallbackQuery, symbol: str):
+    async def _handle_signal_callback(self, query: CallbackQuery, symbol: str) -> None:
         await query.edit_message_text(
             f"🔄 **Membuat sinyal untuk {symbol}...**\n\nMenganalisis data pasar...",
             parse_mode='Markdown'
@@ -545,7 +670,7 @@ class TradingSignalBot:
         assert self.signal_generator is not None
         signal = await self.signal_generator.generate_signal(symbol)
         if signal:
-            message = format_signal_message(symbol, signal) + f"\n\n{get_timeframe_display()}"
+            message = format_signal_message(symbol, cast(Dict[str, Any], signal)) + f"\n\n{get_timeframe_display()}"
             keyboard = [
                 [InlineKeyboardButton("🔄 Muat Ulang", callback_data=f"refresh_signal_{symbol}")],
                 [InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}")],
@@ -555,7 +680,7 @@ class TradingSignalBot:
         else:
             await query.edit_message_text(format_error_message("Gagal membuat sinyal.", symbol), parse_mode='Markdown')
 
-    async def _handle_analyze_callback(self, query: CallbackQuery, symbol: str):
+    async def _handle_analyze_callback(self, query: CallbackQuery, symbol: str) -> None:
         await query.edit_message_text(
             f"🔍 **Menganalisis {symbol}...**\n\nMengumpulkan data pasar...",
             parse_mode='Markdown'
@@ -573,7 +698,7 @@ class TradingSignalBot:
         else:
             await query.edit_message_text(format_error_message("Gagal menganalisis pasar.", symbol), parse_mode='Markdown')
 
-    async def _handle_refresh_signal(self, query: CallbackQuery, symbol: str):
+    async def _handle_refresh_signal(self, query: CallbackQuery, symbol: str) -> None:
         await query.edit_message_text(
             f"🔄 **Refreshing signal for {symbol}...**",
             parse_mode='Markdown'
@@ -581,7 +706,7 @@ class TradingSignalBot:
         assert self.signal_generator is not None
         signal = await self.signal_generator.generate_signal(symbol, force=True)
         if signal:
-            message = format_signal_message(symbol, signal) + f"\n\n{get_timeframe_display()}"
+            message = format_signal_message(symbol, cast(Dict[str, Any], signal)) + f"\n\n{get_timeframe_display()}"
             keyboard = [
                 [InlineKeyboardButton("🔄 Muat Ulang", callback_data=f"refresh_signal_{symbol}")],
                 [InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}")],
@@ -591,7 +716,7 @@ class TradingSignalBot:
         else:
             await query.edit_message_text(format_error_message("Failed to refresh signal.", symbol), parse_mode='Markdown')
 
-    async def _handle_refresh_pairs(self, query: CallbackQuery):
+    async def _handle_refresh_pairs(self, query: CallbackQuery) -> None:
         await query.edit_message_text("🔄 **Memuat daftar pasangan yang didukung...**", parse_mode='Markdown')
         assert self.signal_generator is not None
         pairs = await self.signal_generator.get_supported_pairs()

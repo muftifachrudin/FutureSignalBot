@@ -144,7 +144,18 @@ class SignalGenerator:
             coinglass_data['long_short_ratio'] = await self.coinglass_client.get_long_short_ratio(symbol)
             
             # Get liquidation data
-            coinglass_data['liquidations'] = await self.coinglass_client.get_liquidation_data(symbol)
+            # Liquidation endpoint changed to liquidation/history with >=4h interval.
+            # Keep backward compatibility by trying new helper if available.
+            try:
+                method = getattr(self.coinglass_client, 'get_liquidation_data', None)
+                if callable(method):
+                    coinglass_data['liquidations'] = await method(symbol)
+                else:
+                    method2 = getattr(self.coinglass_client, 'get_liquidation_history', None)
+                    if callable(method2):
+                        coinglass_data['liquidations'] = await method2(symbol)
+            except Exception:
+                pass
             
         except Exception as e:
             logger.error(f"Error collecting Coinglass data for {symbol}: {e}")

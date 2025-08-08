@@ -2,7 +2,6 @@
 Configuration management for the trading signals bot
 """
 import os
-from typing import Dict, List
 
 # Optional: load environment variables from a .env file if present
 try:
@@ -27,7 +26,8 @@ class Config:
     TARGET_EXCHANGE = "MEXC"
     
     # API endpoints
-    COINGLASS_BASE_URL = "https://open-api-v4.coinglass.com/api"
+    # Coinglass v4 base URL (no trailing /api)
+    COINGLASS_BASE_URL = "https://open-api-v4.coinglass.com"
     MEXC_BASE_URL = "https://api.mexc.fm"
     # MEXC Futures (Contract) public API base
     MEXC_CONTRACT_BASE_URL = "https://contract.mexc.fm"

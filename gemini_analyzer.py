@@ -3,13 +3,14 @@ Gemini AI integration for market analysis and signal generation
 """
 import json
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional, Any
 from pydantic import BaseModel
 from config import Config
 
 try:
-    from google import genai
-    from google.genai import types
+    import importlib
+    genai = importlib.import_module("google.genai")  # type: ignore
+    types = importlib.import_module("google.genai.types")  # type: ignore
 except Exception:  # Package may be missing or incompatible
     genai = None
     types = None
@@ -82,7 +83,9 @@ class GeminiAnalyzer:
             2. Volume and open interest changes
             3. Funding rate implications
             4. Long/short ratio analysis
-            5. Support and resistance levels
+            5. Liquidation pressure (long vs short USD)
+            6. Global Fear & Greed index context
+            7. Support and resistance levels
             """
             
             response = self.client.models.generate_content(
@@ -150,8 +153,10 @@ class GeminiAnalyzer:
             2. Open interest changes
             3. Funding rate direction
             4. Long/short ratio extremes
-            5. Volume confirmation
-            6. Risk management levels
+            5. Liquidation imbalance (long vs short)
+            6. Global Fear & Greed index tilt
+            7. Volume confirmation
+            8. Risk management levels
             
             Provide clear reasoning for your signal decision.
             """
@@ -190,7 +195,7 @@ class GeminiAnalyzer:
             prompt = f"""
             Tulis penjelasan singkat (maks 250 kata) dalam Bahasa Indonesia tentang kondisi pasar saat ini untuk {symbol}.
             Gunakan gaya bahasa yang ringkas, jelas, dan ramah trader.
-            Sertakan: tren, indikator kunci (funding, OI, volatilitas), level penting, dan risiko utama.
+            Sertakan: tren, indikator kunci (funding, OI, volatilitas), rasio long/short (jika ada), tekanan likuidasi (long vs short), indeks Fear & Greed, level penting, dan risiko utama.
             
             Data Pasar: {json.dumps(market_data, indent=2, ensure_ascii=False)}
             """
