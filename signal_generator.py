@@ -12,6 +12,27 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+class SignalResponse:
+    """Wrapper class to combine trading signal with market data"""
+    def __init__(self, trading_signal: TradingSignal, market_data: Dict, symbol: str, timestamp: float):
+        self.trading_signal = trading_signal
+        self.market_data = market_data
+        self.symbol = symbol
+        self.timestamp = timestamp
+    
+    def dict(self):
+        """Convert to dictionary for formatting"""
+        return {
+            'signal': self.trading_signal.signal,
+            'confidence': self.trading_signal.confidence,
+            'reasoning': self.trading_signal.reasoning,
+            'entry_price': self.trading_signal.entry_price,
+            'stop_loss': self.trading_signal.stop_loss,
+            'take_profit': self.trading_signal.take_profit,
+            'risk_level': self.trading_signal.risk_level,
+            'market_data': self.market_data
+        }
+
 class SignalGenerator:
     """Main class for generating trading signals"""
     
@@ -53,6 +74,14 @@ class SignalGenerator:
         mexc_data = {}
         
         try:
+            # Get 24hr ticker first (most reliable)
+            try:
+                mexc_data['ticker_24hr'] = await self.mexc_client.get_24hr_ticker(symbol)
+                logger.info(f"Successfully got ticker data for {symbol}")
+            except Exception as e:
+                logger.warning(f"Failed to get ticker data for {symbol}: {e}")
+                mexc_data['ticker_24hr'] = {}
+            
             # Get klines for multiple timeframes
             timeframes = {
                 '5m': '5m',
@@ -64,20 +93,30 @@ class SignalGenerator:
             
             mexc_data['klines'] = {}
             for tf_name, tf_interval in timeframes.items():
-                klines = await self.mexc_client.get_klines(symbol, tf_interval, 50)
-                mexc_data['klines'][tf_name] = klines
+                try:
+                    klines = await self.mexc_client.get_klines(symbol, tf_interval, 20)
+                    mexc_data['klines'][tf_name] = klines
+                    if klines:
+                        logger.info(f"Got {len(klines)} klines for {symbol} {tf_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to get {tf_name} klines for {symbol}: {e}")
+                    mexc_data['klines'][tf_name] = []
             
-            # Get 24hr ticker
-            mexc_data['ticker_24hr'] = await self.mexc_client.get_24hr_ticker(symbol)
+            # Try to get additional data (non-critical)
+            try:
+                mexc_data['funding_rate'] = await self.mexc_client.get_funding_rate(symbol)
+            except:
+                mexc_data['funding_rate'] = {}
             
-            # Get funding rate
-            mexc_data['funding_rate'] = await self.mexc_client.get_funding_rate(symbol)
+            try:
+                mexc_data['open_interest'] = await self.mexc_client.get_open_interest(symbol)
+            except:
+                mexc_data['open_interest'] = {}
             
-            # Get open interest
-            mexc_data['open_interest'] = await self.mexc_client.get_open_interest(symbol)
-            
-            # Get long/short ratio
-            mexc_data['long_short_ratio'] = await self.mexc_client.get_long_short_ratio(symbol)
+            try:
+                mexc_data['long_short_ratio'] = await self.mexc_client.get_long_short_ratio(symbol)
+            except:
+                mexc_data['long_short_ratio'] = {}
             
         except Exception as e:
             logger.error(f"Error collecting MEXC data for {symbol}: {e}")
@@ -267,7 +306,7 @@ class SignalGenerator:
         
         return structured_data
     
-    async def generate_signal(self, symbol: str, force: bool = False) -> Optional[TradingSignal]:
+    async def generate_signal(self, symbol: str, force: bool = False) -> Optional[SignalResponse]:
         """Generate trading signal for a symbol"""
         # Check rate limiting
         if not force and not self._should_generate_signal(symbol):
@@ -335,17 +374,26 @@ class SignalGenerator:
             # Construct structured market data for the response
             structured_market_data = self._construct_structured_market_data(mexc_data, coinglass_data, symbol)
             
-            # Add market data to the signal
-            trading_signal.market_data = structured_market_data
+            # Create comprehensive signal response with market data
+            # Enhanced logging for debugging
+            logger.info(f"MEXC data available: ticker={bool(mexc_data.get('ticker_24hr'))}, klines={len([k for k in mexc_data.get('klines', {}).values() if k])}")
+            logger.info(f"Structured data: {len(structured_market_data.get('kline_data', {}))}/5 timeframes, price_data={bool(structured_market_data.get('price_data'))}")
+            
+            signal_response = SignalResponse(
+                trading_signal=trading_signal,
+                market_data=structured_market_data,
+                symbol=symbol,
+                timestamp=time.time()
+            )
             
             # Cache the signal
             self.signal_cache[symbol] = {
-                'signal': trading_signal,
+                'signal': signal_response,
                 'timestamp': time.time()
             }
             
             logger.info(f"Generated {trading_signal.signal} signal for {symbol} with {trading_signal.confidence:.2f} confidence")
-            return trading_signal
+            return signal_response
             
         except Exception as e:
             logger.error(f"Error generating signal for {symbol}: {e}")

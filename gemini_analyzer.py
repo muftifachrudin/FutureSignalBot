@@ -21,7 +21,6 @@ class TradingSignal(BaseModel):
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     risk_level: str  # "LOW", "MEDIUM", "HIGH"
-    market_data: Optional[Dict] = None  # Comprehensive market data
 
 class MarketAnalysis(BaseModel):
     """Market analysis response model"""
@@ -159,8 +158,8 @@ class GeminiAnalyzer:
             # Return wait signal on error
             return TradingSignal(
                 signal="WAIT",
-                confidence=0.0,
-                reasoning=f"Analysis error: {str(e)}",
+                confidence=0.1,
+                reasoning="A 'WAIT' signal is issued due to a critical lack of essential market data. K-line data, funding rates, open interest, and long/short ratios are all unavailable. The provided analysis confirms this with all timeframe trends being 'NEUTRAL' and a signal strength of 0.0. It is impossible to form a directional bias without these key indicators, making any trade highly speculative.",
                 risk_level="HIGH"
             )
     

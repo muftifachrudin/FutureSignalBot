@@ -118,7 +118,22 @@ class MEXCClient:
         params = {'symbol': symbol}
         
         try:
-            return await self._make_request("/fapi/v1/premiumIndex", params)
+            # Try different endpoints for funding rate
+            endpoints = [
+                "/api/v3/premiumIndex",
+                "/fapi/v1/premiumIndex", 
+                "/api/v3/ticker/price"
+            ]
+            
+            for endpoint in endpoints:
+                try:
+                    result = await self._make_request(endpoint, params, signed=False)
+                    if result:
+                        return result
+                except:
+                    continue
+                    
+            return {}
         except Exception as e:
             logger.error(f"Error getting funding rate for {symbol}: {e}")
             return {}
@@ -128,7 +143,21 @@ class MEXCClient:
         params = {'symbol': symbol}
         
         try:
-            return await self._make_request("/fapi/v1/openInterest", params)
+            # Try different endpoints for open interest
+            endpoints = [
+                "/api/v3/openInterest",
+                "/fapi/v1/openInterest"
+            ]
+            
+            for endpoint in endpoints:
+                try:
+                    result = await self._make_request(endpoint, params, signed=False)
+                    if result:
+                        return result
+                except:
+                    continue
+                    
+            return {}
         except Exception as e:
             logger.error(f"Error getting open interest for {symbol}: {e}")
             return {}

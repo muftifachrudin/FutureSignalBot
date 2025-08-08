@@ -6,7 +6,7 @@ import logging
 from typing import Dict, List, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from signal_generator import SignalGenerator
+from signal_generator_v2 import ImprovedSignalGenerator
 from config import Config
 from utils import (
     format_signal_message, format_market_analysis, format_pairs_list,
@@ -29,7 +29,7 @@ class TradingSignalBot:
         """Start the bot"""
         try:
             # Initialize signal generator
-            self.signal_generator = SignalGenerator()
+            self.signal_generator = ImprovedSignalGenerator()
             await self.signal_generator.__aenter__()
             
             # Create application
@@ -182,7 +182,7 @@ This bot provides AI-powered trading signals for MEXC futures using:
             
             if signal:
                 # Format and send signal
-                message = format_signal_message(symbol, signal.dict())
+                message = format_signal_message(symbol, signal)
                 message += f"\n\n{get_timeframe_display()}"
                 
                 # Add action buttons
