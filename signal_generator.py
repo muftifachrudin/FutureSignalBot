@@ -195,6 +195,78 @@ class SignalGenerator:
         
         return max(-1.0, min(1.0, strength))
     
+    def _construct_structured_market_data(self, mexc_data: Dict, coinglass_data: Dict, symbol: str) -> Dict:
+        """Construct structured market data for signal formatting"""
+        structured_data = {
+            'price_data': {},
+            'coinglass_data': {},
+            'kline_data': {},
+            'timeframes_analyzed': ['5m', '15m', '30m', '1h', '4h']
+        }
+        
+        # Process MEXC price data
+        if mexc_data.get('ticker_24hr'):
+            ticker = mexc_data['ticker_24hr']
+            structured_data['price_data'] = {
+                'markPrice': ticker.get('lastPrice', 0),
+                'priceChangePercent': ticker.get('priceChangePercent', 0),
+                'volume': ticker.get('volume', 0),
+                'openPrice': ticker.get('openPrice', 0),
+                'highPrice': ticker.get('highPrice', 0),
+                'lowPrice': ticker.get('lowPrice', 0)
+            }
+        
+        # Process K-line data for multiple timeframes
+        if mexc_data.get('klines'):
+            for timeframe, klines in mexc_data['klines'].items():
+                if klines and len(klines) > 0:
+                    # Get the latest candle
+                    latest_candle = klines[-1]
+                    structured_data['kline_data'][timeframe] = {
+                        'open': latest_candle[1],
+                        'high': latest_candle[2],
+                        'low': latest_candle[3],
+                        'close': latest_candle[4],
+                        'volume': latest_candle[5]
+                    }
+        
+        # Process Coinglass sentiment data
+        try:
+            # Funding rate
+            if mexc_data.get('funding_rate'):
+                funding = mexc_data['funding_rate']
+                if funding and 'lastFundingRate' in funding:
+                    structured_data['coinglass_data']['funding_rate'] = float(funding['lastFundingRate'])
+            
+            # Open interest
+            if mexc_data.get('open_interest'):
+                oi = mexc_data['open_interest']
+                if oi and 'openInterest' in oi:
+                    structured_data['coinglass_data']['open_interest'] = float(oi['openInterest'])
+            
+            # Long/Short ratio
+            if mexc_data.get('long_short_ratio'):
+                ls_ratio = mexc_data['long_short_ratio']
+                if ls_ratio and isinstance(ls_ratio, list) and ls_ratio:
+                    latest_ratio = ls_ratio[-1]
+                    if 'longAccount' in latest_ratio:
+                        structured_data['coinglass_data']['long_short_ratio'] = float(latest_ratio['longAccount'])
+            
+            # Additional Coinglass data
+            if coinglass_data.get('pairs_markets'):
+                cg_data = coinglass_data['pairs_markets']
+                if isinstance(cg_data, list) and cg_data:
+                    for market in cg_data:
+                        if market.get('exchangeName') == 'MEXC':
+                            if 'h24OpenInterestChange' in market:
+                                structured_data['coinglass_data']['oi_change_24h'] = float(market['h24OpenInterestChange']) / 100
+                            break
+                            
+        except Exception as e:
+            logger.error(f"Error processing sentiment data: {e}")
+        
+        return structured_data
+    
     async def generate_signal(self, symbol: str, force: bool = False) -> Optional[TradingSignal]:
         """Generate trading signal for a symbol"""
         # Check rate limiting
@@ -259,6 +331,12 @@ class SignalGenerator:
             trading_signal = await self.gemini_analyzer.generate_trading_signal(
                 symbol, combined_data, market_analysis
             )
+            
+            # Construct structured market data for the response
+            structured_market_data = self._construct_structured_market_data(mexc_data, coinglass_data, symbol)
+            
+            # Add market data to the signal
+            trading_signal.market_data = structured_market_data
             
             # Cache the signal
             self.signal_cache[symbol] = {

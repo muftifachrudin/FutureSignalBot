@@ -31,6 +31,20 @@ The system performs multi-timeframe technical analysis, incorporates market sent
 - **SHORT**: Multiple timeframes bearish + negative funding rates + high long ratio + declining open interest  
 - **WAIT**: Mixed or unclear market conditions
 
+**Enhanced Signal Display:**
+- Comprehensive market statistics with K-line data for all timeframes
+- Detailed price data including 24h changes and volume
+- Market sentiment indicators (funding rates, open interest, long/short ratios)
+- Professional formatting with emojis and clear data presentation
+- Real-time data from MEXC and Coinglass APIs
+
+**Recent Improvements (2025-08-08):**
+- Enhanced signal message formatting with comprehensive market statistics
+- Added K-line data display for all analyzed timeframes (5m, 15m, 30m, 1h, 4h)
+- Integrated funding rates, open interest, and long/short ratio data in signal output
+- Improved data structure for better presentation of market conditions
+- Fixed data collection and display issues that were causing incomplete signals
+
 # User Preferences
 
 Preferred communication style: Simple, everyday language.

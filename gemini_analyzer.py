@@ -21,6 +21,7 @@ class TradingSignal(BaseModel):
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     risk_level: str  # "LOW", "MEDIUM", "HIGH"
+    market_data: Optional[Dict] = None  # Comprehensive market data
 
 class MarketAnalysis(BaseModel):
     """Market analysis response model"""

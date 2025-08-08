@@ -23,6 +23,20 @@ def format_percentage(value: float, decimals: int = 2) -> str:
     except:
         return "N/A"
 
+def format_volume(volume: float) -> str:
+    """Format volume with appropriate suffixes"""
+    try:
+        if volume >= 1_000_000_000:
+            return f"{volume / 1_000_000_000:.2f}B"
+        elif volume >= 1_000_000:
+            return f"{volume / 1_000_000:.2f}M"
+        elif volume >= 1_000:
+            return f"{volume / 1_000:.2f}K"
+        else:
+            return f"{volume:.2f}"
+    except:
+        return "N/A"
+
 def format_signal_message(symbol: str, signal_data: Dict) -> str:
     """Format trading signal for Telegram message"""
     try:
@@ -33,6 +47,11 @@ def format_signal_message(symbol: str, signal_data: Dict) -> str:
         stop_loss = signal_data.get('stop_loss')
         take_profit = signal_data.get('take_profit')
         risk_level = signal_data.get('risk_level', 'MEDIUM')
+        
+        # Market data
+        market_data = signal_data.get('market_data', {})
+        price_data = market_data.get('price_data', {})
+        coinglass_data = market_data.get('coinglass_data', {})
         
         # Signal emoji
         signal_emoji = {
@@ -53,19 +72,79 @@ def format_signal_message(symbol: str, signal_data: Dict) -> str:
 
 📊 **Confidence:** {confidence:.1%}
 ⚠️ **Risk Level:** {risk_emoji} {risk_level}
-
+"""
+        
+        # Add detailed market statistics
+        if price_data:
+            current_price = price_data.get('markPrice', 0)
+            change_24h = safe_get(price_data, 'priceChangePercent', default=0)
+            volume_24h = safe_get(price_data, 'volume', default=0)
+            
+            message += f"""
+📈 **Price Data:**
+• Current: ${format_price(float(current_price))}
+• 24h Change: {format_percentage(float(change_24h)/100) if change_24h else 'N/A'}
+• 24h Volume: {format_volume(float(volume_24h)) if volume_24h else 'N/A'}
+"""
+        
+        # Add K-line data if available
+        kline_data = market_data.get('kline_data', {})
+        if kline_data:
+            message += f"""
+📊 **K-line Data (Multi-timeframe):**
+"""
+            for timeframe, data in kline_data.items():
+                if data:
+                    open_price = float(data.get('open', 0))
+                    high_price = float(data.get('high', 0))
+                    low_price = float(data.get('low', 0))
+                    close_price = float(data.get('close', 0))
+                    
+                    message += f"• {timeframe}: O:{format_price(open_price)} H:{format_price(high_price)} L:{format_price(low_price)} C:{format_price(close_price)}\n"
+        
+        # Add Coinglass sentiment data
+        if coinglass_data:
+            funding_rate = safe_get(coinglass_data, 'funding_rate')
+            open_interest = safe_get(coinglass_data, 'open_interest')
+            long_short_ratio = safe_get(coinglass_data, 'long_short_ratio')
+            oi_change = safe_get(coinglass_data, 'oi_change_24h')
+            
+            message += f"""
+🔍 **Market Sentiment:**
+"""
+            if funding_rate is not None:
+                funding_emoji = '🟢' if funding_rate > 0 else '🔴' if funding_rate < 0 else '⚪'
+                message += f"• Funding Rate: {funding_emoji} {format_percentage(funding_rate)}\n"
+            
+            if open_interest is not None:
+                message += f"• Open Interest: {format_volume(open_interest)}\n"
+            
+            if oi_change is not None:
+                oi_emoji = '🟢' if oi_change > 0 else '🔴' if oi_change < 0 else '⚪'
+                message += f"• OI 24h Change: {oi_emoji} {format_percentage(oi_change)}\n"
+            
+            if long_short_ratio is not None:
+                ls_emoji = '🟢' if long_short_ratio > 0.6 else '🔴' if long_short_ratio < 0.4 else '⚪'
+                message += f"• Long/Short Ratio: {ls_emoji} {long_short_ratio:.2f}\n"
+        
+        message += f"""
 💭 **Analysis:**
 {reasoning}
 """
         
+        # Trading levels
         if entry_price:
-            message += f"\n🎯 **Entry:** {format_price(entry_price)}"
+            message += f"\n🎯 **Entry:** ${format_price(entry_price)}"
         
         if stop_loss:
-            message += f"\n🛑 **Stop Loss:** {format_price(stop_loss)}"
+            message += f"\n🛑 **Stop Loss:** ${format_price(stop_loss)}"
         
         if take_profit:
-            message += f"\n🎁 **Take Profit:** {format_price(take_profit)}"
+            message += f"\n🎁 **Take Profit:** ${format_price(take_profit)}"
+        
+        # Timeframes analyzed
+        timeframes = market_data.get('timeframes_analyzed', ['5m', '15m', '30m', '1h', '4h'])
+        message += f"\n\n📊 **Analyzed Timeframes:** {' | '.join(timeframes)}"
         
         message += f"\n\n⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
         
