@@ -9,21 +9,20 @@ concurrency:
   group: deploy-aca
   cancel-in-progress: true
 
-env:
-  AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
-  AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
-  ACR_NAME: ${{ vars.ACR_NAME }}
-  ACA_ENV_NAME: ${{ vars.ACA_ENV_NAME }}
-  ACA_APP_NAME: ${{ vars.ACA_APP_NAME }}
-  IMAGE_NAME: futuresignalbot
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-
+    env:
+      RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+      LOCATION: ${{ vars.AZURE_LOCATION }}
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      ENV_NAME: ${{ vars.ACA_ENV_NAME }}
+      APP_NAME: ${{ vars.ACA_APP_NAME }}
+      IMAGE_NAME: futuresignalbot
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,137 +34,109 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Ensure Azure resources (RG, ACR)
+      - name: Install containerapp extension
+        uses: azure/cli@v2
+        with:
+          inlineScript: az extension add -n containerapp --upgrade
+
+      - name: Prepare ACR
+        id: acr
         uses: azure/cli@v2
         with:
           inlineScript: |
             set -e
-            RG="${{ env.AZURE_RESOURCE_GROUP }}"
-            LOC="${{ env.AZURE_LOCATION }}"
-            ACR="${{ env.ACR_NAME }}"
-
-            if [ -z "$RG" ] || [ -z "$LOC" ] || [ -z "$ACR" ]; then
-              echo "AZURE_RESOURCE_GROUP, AZURE_LOCATION, ACR_NAME variables are required" >&2
-              exit 1
+            [ -z "$RG" ] && echo "Missing RG" && exit 1
+            [ -z "$LOCATION" ] && echo "Missing LOCATION" && exit 1
+            [ -z "$ACR_NAME" ] && echo "Missing ACR_NAME" && exit 1
+            az group create -n "$RG" -l "$LOCATION" 1> /dev/null
+            if ! az acr show -n "$ACR_NAME" -g "$RG" 1> /dev/null 2>&1; then
+              az acr create -n "$ACR_NAME" -g "$RG" -l "$LOCATION" --sku Basic --admin-enabled true 1> /dev/null
             fi
-
-            az group create -n "$RG" -l "$LOC" 1> /dev/null
-
-            if ! az acr show -n "$ACR" -g "$RG" 1> /dev/null 2>&1; then
-              az acr create -n "$ACR" -g "$RG" -l "$LOC" --sku Basic --admin-enabled true 1> /dev/null
-            fi
-
-            ACR_LOGIN_SERVER=$(az acr show -n "$ACR" -g "$RG" --query loginServer -o tsv)
-            ACR_USERNAME=$(az acr credential show -n "$ACR" -g "$RG" --query username -o tsv)
-            ACR_PASSWORD=$(az acr credential show -n "$ACR" -g "$RG" --query passwords[0].value -o tsv)
+            ACR_LOGIN_SERVER=$(az acr show -n "$ACR_NAME" -g "$RG" --query loginServer -o tsv)
+            ACR_USERNAME=$(az acr credential show -n "$ACR_NAME" -g "$RG" --query username -o tsv)
+            ACR_PASSWORD=$(az acr credential show -n "$ACR_NAME" -g "$RG" --query passwords[0].value -o tsv)
             echo "::add-mask::$ACR_PASSWORD"
-            echo "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" >> $GITHUB_ENV
-            echo "ACR_USERNAME=$ACR_USERNAME" >> $GITHUB_ENV
-            echo "ACR_PASSWORD=$ACR_PASSWORD" >> $GITHUB_ENV
+            echo "acr_login_server=$ACR_LOGIN_SERVER" >> $GITHUB_OUTPUT
+            echo "acr_username=$ACR_USERNAME" >> $GITHUB_OUTPUT
+            echo "acr_password=$ACR_PASSWORD" >> $GITHUB_OUTPUT
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Docker Login to ACR
+      - name: Docker login
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.ACR_LOGIN_SERVER }}
-          username: ${{ env.ACR_USERNAME }}
-          password: ${{ env.ACR_PASSWORD }}
+          registry: ${{ steps.acr.outputs.acr_login_server }}
+          username: ${{ steps.acr.outputs.acr_username }}
+          password: ${{ steps.acr.outputs.acr_password }}
 
-      - name: Build and Push Image
+      - name: Build & push image
         run: |
           set -e
-          IMAGE_TAG_SHA=${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          IMAGE_TAG_LATEST=${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
-          docker build -t "$IMAGE_TAG_SHA" -t "$IMAGE_TAG_LATEST" .
-          docker push "$IMAGE_TAG_SHA"
-          docker push "$IMAGE_TAG_LATEST"
-          echo "IMAGE_TAG=$IMAGE_TAG_LATEST" >> $GITHUB_ENV
+          REG=${{ steps.acr.outputs.acr_login_server }}
+          IMAGE_SHA=$REG/${{ env.IMAGE_NAME }}:${GITHUB_SHA}
+          IMAGE_LATEST=$REG/${{ env.IMAGE_NAME }}:latest
+          docker build -t "$IMAGE_SHA" -t "$IMAGE_LATEST" .
+          docker push "$IMAGE_SHA"
+          docker push "$IMAGE_LATEST"
+          echo "IMAGE_TAG=$IMAGE_LATEST" >> $GITHUB_ENV
 
-      - name: Provision Container Apps Env (with Log Analytics)
+      - name: Provision Container Apps Environment
         uses: azure/cli@v2
         with:
           inlineScript: |
             set -e
-            RG="${{ env.AZURE_RESOURCE_GROUP }}"
-            LOC="${{ env.AZURE_LOCATION }}"
-            ENV_NAME="${{ env.ACA_ENV_NAME }}"
-
-            if [ -z "$ENV_NAME" ]; then
-              echo "ACA_ENV_NAME variable is required" >&2
-              exit 1
-            fi
-
-            # Create or get Log Analytics Workspace
+            [ -z "$ENV_NAME" ] && echo "Missing ENV_NAME" && exit 1
             LAW_NAME="${ENV_NAME}-law"
             if ! az monitor log-analytics workspace show -g "$RG" -n "$LAW_NAME" 1> /dev/null 2>&1; then
-              az monitor log-analytics workspace create -g "$RG" -n "$LAW_NAME" -l "$LOC" 1> /dev/null
+              az monitor log-analytics workspace create -g "$RG" -n "$LAW_NAME" -l "$LOCATION" 1> /dev/null
             fi
             LAW_ID=$(az monitor log-analytics workspace show -g "$RG" -n "$LAW_NAME" --query customerId -o tsv)
             LAW_KEY=$(az monitor log-analytics workspace get-shared-keys -g "$RG" -n "$LAW_NAME" --query primarySharedKey -o tsv)
-
-            # Create Container Apps Environment if not exists
             if ! az containerapp env show -g "$RG" -n "$ENV_NAME" 1> /dev/null 2>&1; then
-              az containerapp env create -g "$RG" -n "$ENV_NAME" -l "$LOC" \
-                --logs-workspace-id "$LAW_ID" --logs-workspace-key "$LAW_KEY" 1> /dev/null
+              az containerapp env create -g "$RG" -n "$ENV_NAME" -l "$LOCATION" --logs-workspace-id "$LAW_ID" --logs-workspace-key "$LAW_KEY" 1> /dev/null
             fi
 
-      - name: Create/Update Container App
+      - name: Deploy / Update Container App
         uses: azure/cli@v2
+        env:
+          telegram-bot-token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          coinglass-api-key: ${{ secrets.COINGLASS_API_KEY }}
+          mexc-api-key: ${{ secrets.MEXC_API_KEY }}
+          mexc-secret-key: ${{ secrets.MEXC_SECRET_KEY }}
+          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
         with:
           inlineScript: |
             set -e
-            RG="${{ env.AZURE_RESOURCE_GROUP }}"
-            ENV_NAME="${{ env.ACA_ENV_NAME }}"
-            APP_NAME="${{ env.ACA_APP_NAME }}"
-            ACR_SERVER="${{ env.ACR_LOGIN_SERVER }}"
-            ACR_USER="${{ env.ACR_USERNAME }}"
-            ACR_PASS="${{ env.ACR_PASSWORD }}"
-            IMAGE="${{ env.IMAGE_TAG }}"
-
-            if [ -z "$APP_NAME" ]; then
-              echo "ACA_APP_NAME variable is required" >&2
-              exit 1
-            fi
-
-            # Set or update secrets (bot/API tokens)
-            az containerapp secret set -g "$RG" -n "$APP_NAME" \
-              --secrets \
-                TELEGRAM_BOT_TOKEN='${{ secrets.TELEGRAM_BOT_TOKEN }}' \
-                COINGLASS_API_KEY='${{ secrets.COINGLASS_API_KEY }}' \
-                MEXC_API_KEY='${{ secrets.MEXC_API_KEY }}' \
-                MEXC_SECRET_KEY='${{ secrets.MEXC_SECRET_KEY }}' \
-                GEMINI_API_KEY='${{ secrets.GEMINI_API_KEY }}' || true
-
-            ENV_VARS="TELEGRAM_BOT_TOKEN=secretref:TELEGRAM_BOT_TOKEN COINGLASS_API_KEY=secretref:COINGLASS_API_KEY MEXC_API_KEY=secretref:MEXC_API_KEY MEXC_SECRET_KEY=secretref:MEXC_SECRET_KEY GEMINI_API_KEY=secretref:GEMINI_API_KEY"
-
+            IMAGE="$IMAGE_TAG"
+            REG=${{ steps.acr.outputs.acr_login_server }}
+            USER=${{ steps.acr.outputs.acr_username }}
+            PASS=${{ steps.acr.outputs.acr_password }}
+            # Validate required secret
+            [ -z "$TELEGRAM_BOT_TOKEN" ] && echo "Missing TELEGRAM_BOT_TOKEN secret" && exit 1
+            # Build secrets args dynamically (lowercase names) only for non-empty values
+            secret_args=(telegram-bot-token="$TELEGRAM_BOT_TOKEN")
+            [ -n "$COINGLASS_API_KEY" ] && secret_args+=(coinglass-api-key="$COINGLASS_API_KEY")
+            [ -n "$MEXC_API_KEY" ] && secret_args+=(mexc-api-key="$MEXC_API_KEY")
+            [ -n "$MEXC_SECRET_KEY" ] && secret_args+=(mexc-secret-key="$MEXC_SECRET_KEY")
+            [ -n "$GEMINI_API_KEY" ] && secret_args+=(gemini-api-key="$GEMINI_API_KEY")
+            # Apply secrets (ignore failure if app not yet exists - handled in create path)
+            az containerapp secret set -g "$RG" -n "$APP_NAME" --secrets "${secret_args[@]}" 2>/dev/null || true
+            # Map to env vars expected by the app
+            ENV_VARS="TELEGRAM_BOT_TOKEN=secretref:telegram-bot-token"
+            [ -n "$COINGLASS_API_KEY" ] && ENV_VARS+=" COINGLASS_API_KEY=secretref:coinglass-api-key"
+            [ -n "$MEXC_API_KEY" ] && ENV_VARS+=" MEXC_API_KEY=secretref:mexc-api-key"
+            [ -n "$MEXC_SECRET_KEY" ] && ENV_VARS+=" MEXC_SECRET_KEY=secretref:mexc-secret-key"
+            [ -n "$GEMINI_API_KEY" ] && ENV_VARS+=" GEMINI_API_KEY=secretref:gemini-api-key"
             if az containerapp show -g "$RG" -n "$APP_NAME" 1> /dev/null 2>&1; then
-              az containerapp update -g "$RG" -n "$APP_NAME" \
-                --image "$IMAGE" \
-                --registry-server "$ACR_SERVER" --registry-username "$ACR_USER" --registry-password "$ACR_PASS" \
-                --set-env-vars $ENV_VARS \
-                --ingress external=false \
-                --min-replicas 1 --max-replicas 1 \
-                --cpu 0.25 --memory 0.5Gi 1> /dev/null
+              az containerapp update -g "$RG" -n "$APP_NAME" --image "$IMAGE" \
+                --registry-server "$REG" --registry-username "$USER" --registry-password "$PASS" \
+                --set-env-vars $ENV_VARS --min-replicas 1 --max-replicas 1 --cpu 0.25 --memory 0.5Gi 1> /dev/null
             else
-              az containerapp create -g "$RG" -n "$APP_NAME" --environment "$ENV_NAME" \
-                --image "$IMAGE" \
-                --registry-server "$ACR_SERVER" --registry-username "$ACR_USER" --registry-password "$ACR_PASS" \
-                --secrets \
-                  TELEGRAM_BOT_TOKEN='${{ secrets.TELEGRAM_BOT_TOKEN }}' \
-                  COINGLASS_API_KEY='${{ secrets.COINGLASS_API_KEY }}' \
-                  MEXC_API_KEY='${{ secrets.MEXC_API_KEY }}' \
-                  MEXC_SECRET_KEY='${{ secrets.MEXC_SECRET_KEY }}' \
-                  GEMINI_API_KEY='${{ secrets.GEMINI_API_KEY }}' \
-                --env-vars $ENV_VARS \
-                --ingress external=false \
-                --min-replicas 1 --max-replicas 1 \
-                --cpu 0.25 --memory 0.5Gi 1> /dev/null
+              az containerapp create -g "$RG" -n "$APP_NAME" --environment "$ENV_NAME" --image "$IMAGE" \
+                --registry-server "$REG" --registry-username "$USER" --registry-password "$PASS" \
+                --secrets "${secret_args[@]}" \
+                --env-vars $ENV_VARS --min-replicas 1 --max-replicas 1 --cpu 0.25 --memory 0.5Gi 1> /dev/null
             fi
 
-      - name: Show App Revisions
+      - name: Show Revisions
         uses: azure/cli@v2
         with:
-          inlineScript: |
-            az containerapp revision list -g "${{ env.AZURE_RESOURCE_GROUP }}" -n "${{ env.ACA_APP_NAME }}" -o table || true
+          inlineScript: az containerapp revision list -g "$RG" -n "$APP_NAME" -o table || true
