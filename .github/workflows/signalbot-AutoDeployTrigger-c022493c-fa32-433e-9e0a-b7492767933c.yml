@@ -1,0 +1,45 @@
+name: Trigger auto deployment for signalbot
+
+# When this action will be executed
+on:
+  # Automatically trigger it when detected changes in repo
+  push:
+    branches: 
+      [ main ]
+    paths:
+    - '**'
+    - '.github/workflows/signalbot-AutoDeployTrigger-c022493c-fa32-433e-9e0a-b7492767933c.yml'
+
+  # Allow manual trigger 
+  workflow_dispatch:
+      
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout to the branch
+        uses: actions/checkout@v2
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.SIGNALBOT_AZURE_CREDENTIALS }}
+
+      - name: Build and push container image to registry
+        uses: azure/container-apps-deploy-action@v2
+        with:
+          appSourcePath: ${{ github.workspace }}
+          _dockerfilePathKey_: _dockerfilePath_
+          _targetLabelKey_: _targetLabel_
+          registryUrl: fsbcontainerregistry.azurecr.io
+          registryUsername: ${{ secrets.SIGNALBOT_REGISTRY_USERNAME }}
+          registryPassword: ${{ secrets.SIGNALBOT_REGISTRY_PASSWORD }}
+          containerAppName: signalbot
+          resourceGroup: fsb-rg
+          imageToBuild: fsbcontainerregistry.azurecr.io/signalbot:${{ github.sha }}
+          
+            
+
+     
+
