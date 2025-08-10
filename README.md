@@ -107,6 +107,81 @@ Catatan:
 - `services/` — Klien API (Coinglass v4, MEXC .fm)
 - `scripts/quick_signal_test.py` — Uji metrik cepat untuk simbol
 - `logs/` — Output log
+  \n+## Deploy di Linux VM (systemd)
+  Contoh: Ubuntu 22.04, jalankan 24/7 dengan systemd.
+
+### 1. User & Direktori
+
+```bash
+sudo useradd -r -m -d /opt/futuresignalbot -s /usr/sbin/nologin fsbot
+sudo chown fsbot:fsbot /opt/futuresignalbot
+```
+
+### 2. Clone & Install
+
+```bash
+sudo -u fsbot bash -c 'cd /opt/futuresignalbot && git clone https://github.com/youruser/FutureSignalBot .'
+sudo -u fsbot bash -c 'cd /opt/futuresignalbot && python3.11 -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -r requirements.txt'
+```
+
+### 3. Environment File
+
+`/etc/futuresignalbot.env` (chmod 640 root:fsbot):
+
+```
+TELEGRAM_BOT_TOKEN=xxxx
+COINGLASS_API_KEY=xxxx
+MEXC_API_KEY=xxxx
+MEXC_SECRET_KEY=xxxx
+GEMINI_API_KEY=xxxx
+PYTHONUNBUFFERED=1
+```
+
+```bash
+sudo bash -c 'chmod 640 /etc/futuresignalbot.env && chown root:fsbot /etc/futuresignalbot.env'
+```
+
+### 4. systemd Unit
+
+Salin `systemd/futuresignalbot.service` ke `/etc/systemd/system/`:
+
+```bash
+sudo cp systemd/futuresignalbot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now futuresignalbot
+```
+
+### 5. Verifikasi & Log
+
+```bash
+systemctl status futuresignalbot --no-pager
+journalctl -u futuresignalbot -f
+```
+
+Log file juga ada di `logs/bot.log`.
+
+### 6. Update Versi
+
+```bash
+sudo systemctl stop futuresignalbot
+sudo -u fsbot bash -c 'cd /opt/futuresignalbot && git pull && .venv/bin/pip install -r requirements.txt'
+sudo systemctl start futuresignalbot
+```
+
+### 7. Mode Docker (Alternatif)
+
+```bash
+docker build -t futuresignalbot:latest .
+docker run -d --name futuresignalbot --restart=unless-stopped --env-file /etc/futuresignalbot.env futuresignalbot:latest
+```
+
+Image sudah mengabaikan `.env` (lihat `.dockerignore`).
+
+### Catatan Keamanan
+
+- User non-login (`fsbot`) membatasi akses.
+- `Restart=on-failure` otomatis restart saat crash.
+- Gunakan firewall & rotasi log bila beban tinggi.
 
 ## Keamanan
 

@@ -1,0 +1,25 @@
+[Unit]
+Description=Future Signal Bot (MEXC Futures Telegram Bot)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/futuresignalbot
+ExecStart=/opt/futuresignalbot/.venv/bin/python -m main
+Restart=on-failure
+RestartSec=10
+User=fsbot
+Group=fsbot
+EnvironmentFile=/etc/futuresignalbot.env
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+LimitNOFILE=65535
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

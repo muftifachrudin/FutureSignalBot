@@ -1,12 +1,15 @@
 [project]
-name = "repl-nix-workspace"
-version = "0.1.0"
-description = "Add your description here"
-requires-python = ">=3.11"
+name = "future-signal-bot"
+version = "1.0.0"
+description = "MEXC Futures Telegram signal bot with Coinglass & Gemini integration"
+requires-python = ">=3.11,<3.12"
 dependencies = [
-    "aiohttp>=3.12.15",
-    "google-genai>=1.29.0",
-    "pydantic>=2.11.7",
-    "python-telegram-bot>=22.3",
-    "sift-stack-py>=0.8.2",
+    # Pinned to match requirements.txt for reproducibility
+    "aiohttp==3.12.15",
+    "google-genai==1.29.0",
+    "pydantic==2.11.7",
+    "python-telegram-bot==22.3",
+    "sift-stack-py==0.8.2",
+    "requests==2.32.3",
 ]
+

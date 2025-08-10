@@ -23,6 +23,7 @@ jobs:
       ENV_NAME: ${{ vars.ACA_ENV_NAME }}
       APP_NAME: ${{ vars.ACA_APP_NAME }}
       IMAGE_NAME: futuresignalbot
+  MAX_REPLICAS: ${{ vars.ACA_MAX_REPLICAS }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -128,12 +129,18 @@ jobs:
             if az containerapp show -g "$RG" -n "$APP_NAME" 1> /dev/null 2>&1; then
               az containerapp update -g "$RG" -n "$APP_NAME" --image "$IMAGE" \
                 --registry-server "$REG" --registry-username "$USER" --registry-password "$PASS" \
-                --set-env-vars $ENV_VARS --min-replicas 1 --max-replicas 1 --cpu 0.25 --memory 0.5Gi 1> /dev/null
+                --set-env-vars $ENV_VARS \
+                --min-replicas 1 --max-replicas "$MAX_REPLICAS" --cpu 0.25 --memory 0.5Gi \
+                --scale-rule-name cpu-auto --scale-rule-type cpu \
+                --scale-rule-metadata type=Utilization value="$CPU_TARGET" 1> /dev/null
             else
               az containerapp create -g "$RG" -n "$APP_NAME" --environment "$ENV_NAME" --image "$IMAGE" \
                 --registry-server "$REG" --registry-username "$USER" --registry-password "$PASS" \
                 --secrets "${secret_args[@]}" \
-                --env-vars $ENV_VARS --min-replicas 1 --max-replicas 1 --cpu 0.25 --memory 0.5Gi 1> /dev/null
+                --env-vars $ENV_VARS \
+                --min-replicas 1 --max-replicas "$MAX_REPLICAS" --cpu 0.25 --memory 0.5Gi \
+                --scale-rule-name cpu-auto --scale-rule-type cpu \
+                --scale-rule-metadata type=Utilization value="$CPU_TARGET" 1> /dev/null
             fi
 
       - name: Show Revisions
