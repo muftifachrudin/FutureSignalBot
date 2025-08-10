@@ -645,14 +645,18 @@ class PairsCache:
                 try:
                     if 'value' in fg:
                         fg_val = float(fg.get('value') or 0)
-                    elif 'list' in fg and isinstance(fg.get('list'), list) and fg.get('list'):
-                        last_fg_any = fg.get('list')[-1]
-                        if isinstance(last_fg_any, dict):
-                            try:
-                                fg_val_raw = last_fg_any.get('value') or 0
-                                fg_val = float(fg_val_raw)
-                            except Exception:
-                                fg_val = None
+                    else:
+                        list_any = fg.get('list')  # fg is Dict[str, Any]
+                        if isinstance(list_any, list) and list_any:
+                            last_fg_candidate = cast(Any, list_any[-1])
+                            if isinstance(last_fg_candidate, dict):
+                                last_fg_dict: Dict[str, Any] = cast(Dict[str, Any], last_fg_candidate)
+                                val_raw: Any = last_fg_dict.get('value')
+                                try:
+                                    if val_raw is not None:
+                                        fg_val = float(val_raw)
+                                except Exception:
+                                    fg_val = None
                 except Exception:
                     fg_val = None
                 structured: Dict[str, Any] = {

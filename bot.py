@@ -193,15 +193,17 @@ class TradingSignalBot:
             return
         # Global error handler
         application.add_error_handler(self.error_handler)
+        # Command handlers
         application.add_handler(CommandHandler("start", self.start_command))
         application.add_handler(CommandHandler("help", self.help_command))
         application.add_handler(CommandHandler("signal", self.signal_command))
         application.add_handler(CommandHandler("analyze", self.analyze_command))
         application.add_handler(CommandHandler("pairs", self.pairs_command))
-    application.add_handler(CommandHandler("pairs_add", self.pairs_add_command))
-    application.add_handler(CommandHandler("pairs_remove", self.pairs_remove_command))
+        application.add_handler(CommandHandler("pairs_add", self.pairs_add_command))
+        application.add_handler(CommandHandler("pairs_remove", self.pairs_remove_command))
         application.add_handler(CommandHandler("timeframes", self.timeframes_command))
         application.add_handler(CommandHandler("about", self.about_command))
+        # Callback & message handlers
         application.add_handler(CallbackQueryHandler(self.button_callback))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_symbol_message))
 
@@ -379,7 +381,8 @@ class TradingSignalBot:
             assert self.signal_generator is not None
             supported = set(await self.signal_generator.get_supported_pairs())
         except Exception:
-            supported = set()
+            # Explicit type annotation to avoid 'set[Unknown]' diagnostic
+            supported: set[str] = set()
         watchlist = await self.pairs_store.get_pairs()
         display_pairs = [p for p in watchlist if p in supported] or watchlist
         message = format_pairs_list(display_pairs)

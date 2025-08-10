@@ -83,7 +83,14 @@ class PairsStore:
             with self.file_path.open("r", encoding="utf-8") as f:
                 raw = json.load(f)
             if isinstance(raw, list):
-                data_list: List[str] = [str(s).upper() for s in raw]
+                # Force each item to Any then string; filters out non-stringifiable safely
+                data_list: List[str] = []
+                for item in raw:  # type: ignore[no-untyped-call]
+                    try:
+                        s = str(item)  # type: ignore[arg-type]
+                        data_list.append(s.upper())
+                    except Exception:
+                        continue
                 return data_list
         except json.JSONDecodeError:
             # Corrupted file – backup then reset
