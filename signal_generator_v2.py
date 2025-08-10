@@ -626,16 +626,73 @@ class PairsCache:
             
             # Enhance with Gemini analysis if available
             try:
+                # Build a richer structured snapshot for Gemini
+                ticker = cast(Dict[str, Any], market_data.get('mexc_ticker', {}) or {})
+                cg_summary = cast(Dict[str, Any], market_data.get('coinglass_summary', {}) or {})
+                liq = cast(Dict[str, Any], market_data.get('coinglass_liquidations', {}) or {})
+                fg = cast(Dict[str, Any], market_data.get('fear_greed', {}) or {})
+                try:
+                    long_liq_any: Any = liq.get('longVolUsd') or liq.get('long_volume_usd') or 0
+                    long_liq = float(long_liq_any) if long_liq_any not in (None, "") else 0.0
+                except Exception:
+                    long_liq = 0.0
+                try:
+                    short_liq_any: Any = liq.get('shortVolUsd') or liq.get('short_volume_usd') or 0
+                    short_liq = float(short_liq_any) if short_liq_any not in (None, "") else 0.0
+                except Exception:
+                    short_liq = 0.0
+                fg_val: Optional[float] = None
+                try:
+                    if 'value' in fg:
+                        fg_val = float(fg.get('value') or 0)
+                    elif 'list' in fg and isinstance(fg.get('list'), list) and fg.get('list'):
+                        last_fg_any = fg.get('list')[-1]
+                        if isinstance(last_fg_any, dict):
+                            try:
+                                fg_val_raw = last_fg_any.get('value') or 0
+                                fg_val = float(fg_val_raw)
+                            except Exception:
+                                fg_val = None
+                except Exception:
+                    fg_val = None
+                structured: Dict[str, Any] = {
+                    'symbol': symbol,
+                    'price': {
+                        'last': ticker.get('lastPrice'),
+                        'change_pct_24h': ticker.get('priceChangePercent'),
+                        'high_24h': ticker.get('highPrice'),
+                        'low_24h': ticker.get('lowPrice'),
+                        'volume_24h': ticker.get('volume')
+                    },
+                    'derived_price_analysis': price_analysis,
+                    'sentiment_analysis': sentiment_analysis,
+                    'coinglass_summary': cg_summary,
+                    'risk_metrics': {
+                        'funding_rate': cg_summary.get('funding_rate'),
+                        'open_interest': cg_summary.get('open_interest'),
+                        'oi_change_24h_pct': cg_summary.get('oi_change_24h'),
+                        'long_short_ratio': cg_summary.get('long_short_ratio'),
+                        'liquidations_long_usd': long_liq,
+                        'liquidations_short_usd': short_liq,
+                        'fear_greed_index': fg_val,
+                    }
+                }
                 gemini_prompt = f"""
-Analyze this cryptocurrency market data for {symbol} and provide trading insight:
+Anda adalah analis futures kripto profesional. Evaluasi data terstruktur berikut dan berikan insight trading ringkas (<=180 kata) dalam Bahasa Indonesia.
 
-Price Analysis: {price_analysis}
-Market Sentiment: {sentiment_analysis}
-Current Price: ${market_data['mexc_ticker'].get('lastPrice', 'N/A')}
-24h Change: {market_data['mexc_ticker'].get('priceChangePercent', 'N/A')}%
+1. Validasi apakah arah sinyal '{signal_result['signal']}' sudah tepat.
+2. Jika berbeda, sarankan penyesuaian dan jelaskan alasan (funding, OI, rasio long/short, momentum, volatilitas).
+3. Identifikasi 1-2 risiko utama (mis. funding ekstrem, OI divergen, volatilitas tinggi, ketidakseimbangan likuidasi).
+4. Beri nada objektif, hindari hype, sertakan peringatan risiko.
 
-Based on this data, provide a brief analysis confirming or adjusting the signal direction.
-Consider: trend strength, momentum, funding rates, and open interest changes.
+DATA:
+{structured}
+
+Format keluaran:
+- Ringkasan arah & konfirmasi
+- Faktor pendukung (bullet pendek)
+- Risiko / waspada
+- Catatan manajemen risiko singkat
 """
                 
                 gemini_response = await self.gemini_analyzer.explain_market_conditions(symbol, {'analysis': gemini_prompt})
