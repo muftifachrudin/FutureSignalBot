@@ -107,10 +107,8 @@ Catatan:
 - `services/` — Klien API (Coinglass v4, MEXC .fm)
 - `scripts/quick_signal_test.py` — Uji metrik cepat untuk simbol
 - `logs/` — Output log
-
-## Deploy di Linux VM (systemd)
-
-Contoh: Ubuntu 22.04, jalankan 24/7 dengan systemd.
+  \n+## Deploy di Linux VM (systemd)
+  Contoh: Ubuntu 22.04, jalankan 24/7 dengan systemd.
 
 ### 1. User & Direktori
 
@@ -185,49 +183,6 @@ Image sudah mengabaikan `.env` (lihat `.dockerignore`).
 - `Restart=on-failure` otomatis restart saat crash.
 - Gunakan firewall & rotasi log bila beban tinggi.
 
-## Azure VM (Cepat) – Region Gemini Friendly
-
-Region direkomendasikan: `eastus`, `eastus2`, `westeurope`, `northeurope`, `westus3`.
-
-### Opsi A: Cloud-init Saat Membuat VM
-
-Gunakan file `infra/cloud-init-fsbot.yaml` (edit placeholder token & SSH key).
-
-Contoh (portal atau CLI --custom-data): pastikan ganti `REPLACE_...`.
-
-### Opsi B: Script Manual
-
-Setelah VM siap dan Anda SSH masuk:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/muftifachrudin/FutureSignalBot/main/scripts/setup_fsbot_vm.sh -o setup_fsbot_vm.sh
-sudo bash setup_fsbot_vm.sh
-sudo nano /etc/futuresignalbot.env   # isi secrets
-sudo systemctl start futuresignalbot.service
-sudo systemctl status futuresignalbot.service
-```
-
-### Cek Log Runtime
-
-```bash
-journalctl -u futuresignalbot.service -f
-```
-
-### Update Kode
-
-```bash
-sudo systemctl stop futuresignalbot.service
-cd /opt/futuresignalbot && sudo -u fsbot git pull --ff-only
-sudo systemctl start futuresignalbot.service
-```
-
-### Gemini Geo Block
-
-Jika muncul `FAILED_PRECONDITION` terkait lokasi:
-
-- Migrasi VM ke region yang didukung.
-- Atau gunakan proxy outbound (SOCKS/HTTPS) ke region diperbolehkan.
-
 ## Keamanan
 
 - Jangan commit `.env`. Gunakan secrets di CI/CD.
@@ -236,3 +191,106 @@ Jika muncul `FAILED_PRECONDITION` terkait lokasi:
 ## Lisensi
 
 Gunakan sesuai kebutuhan Anda. Tambahkan berkas LICENSE jika ingin membagikan lisensi spesifik (mis. MIT).
+
+---
+
+## Operasional & Keamanan Lanjutan
+
+### Rotasi Kredensial
+
+Jika token/API key terekspos:
+
+1. Revoke & generate baru (Telegram BotFather, MEXC, Coinglass, Gemini).
+2. Update `/etc/futuresignalbot.env` dan sinkronkan ke `/opt/futuresignalbot/.env`.
+3. `sudo systemctl restart futuresignalbot.service`
+4. Verifikasi: `curl -s https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getMe | grep '"ok":true'`
+
+### Rewrite Git History (Hapus Jejak Secrets)
+
+```
+pip install git-filter-repo
+git rm --cached .env || true
+cat > replace.txt <<'R'
+OLD_TELEGRAM_TOKEN==REMOVED_SECRET
+OLD_MEXC_KEY==REMOVED_SECRET
+OLD_MEXC_SECRET==REMOVED_SECRET
+OLD_COINGLASS_KEY==REMOVED_SECRET
+OLD_GEMINI_KEY==REMOVED_SECRET
+R
+git filter-repo --path .env --invert-paths
+git filter-repo --replace-text replace.txt
+git push --force origin main
+```
+
+Regenerasi token sebelum force push.
+
+### systemd Watchdog (Opsional)
+
+Tambahkan ke unit override:
+
+```
+sudo systemctl edit futuresignalbot.service
+```
+
+Isi:
+
+```
+[Service]
+WatchdogSec=60
+StartLimitIntervalSec=300
+StartLimitBurst=5
+```
+
+Reload: `sudo systemctl daemon-reload && sudo systemctl restart futuresignalbot.service`
+
+### Health Check Timer (Opsional)
+
+```
+sudo tee /usr/local/bin/fsbot-health.sh >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -e
+[ -f /opt/futuresignalbot/.env ] && source /opt/futuresignalbot/.env
+curl -s --max-time 8 https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe | grep -q '"ok":true' || systemctl restart futuresignalbot.service
+EOF
+sudo chmod 700 /usr/local/bin/fsbot-health.sh
+sudo tee /etc/systemd/system/fsbot-health.service >/dev/null <<'EOF'
+[Unit]
+Description=Health check FutureSignalBot
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /usr/local/bin/fsbot-health.sh
+EOF
+sudo tee /etc/systemd/system/fsbot-health.timer >/dev/null <<'EOF'
+[Unit]
+Description=Run health check every 5 minutes
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=5m
+Unit=fsbot-health.service
+[Install]
+WantedBy=timers.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now fsbot-health.timer
+```
+
+### Firewall & Hardening
+
+- Batasi port (SSH 22; 80/443 jika perlu webhook).
+- UFW / NSG aturan minimal; pertimbangkan Fail2ban.
+- Permissions secrets 640 root:fsbot atau 600 root:root.
+
+### Logging
+
+- RotatingFileHandler aktif (2MB x3). Tambah logrotate bila volume tinggi.
+
+### Pembersihan Debug
+
+Hapus `ExecStartPre` sementara dari unit setelah troubleshooting.
+
+### Roadmap Teknis
+
+- Mode webhook + proxy TLS
+- Penyimpanan historis sinyal (evaluasi performa)
+- Key Vault / Secrets Manager integrasi
+- Observability (metrics/tracing) Application Insights / Prometheus
