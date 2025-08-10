@@ -109,6 +109,19 @@ class Config:
     # Custom path for pairs watchlist file (optional)
     PAIRS_WATCHLIST_PATH = os.getenv("PAIRS_WATCHLIST_PATH", "")
     
+    # Micro metrics / scalping settings
+    MICRO_METRICS_RETENTION_MINUTES = int(os.getenv("MICRO_METRICS_RETENTION_MINUTES", "720"))  # 12h default
+    ATR1M_PERIOD = int(os.getenv("ATR1M_PERIOD", "14"))
+    VOLUME_PROFILE_BUCKETS = int(os.getenv("VOLUME_PROFILE_BUCKETS", "24"))
+    ENABLE_VOLUME_PROFILE_SCALP = os.getenv("ENABLE_VOLUME_PROFILE_SCALP", "1") != "0"
+    # Toggle inclusion of volume profile & ATR1m micro metrics inside broader market explanation (/analyze)
+    ENABLE_VOLUME_PROFILE_EXPLANATION = os.getenv("ENABLE_VOLUME_PROFILE_EXPLANATION", "1") != "0"
+    SCALP_MAX_MESSAGE_LEN = int(os.getenv("SCALP_MAX_MESSAGE_LEN", "900"))
+    MICRO_METRICS_PERSIST_PATH = os.getenv("MICRO_METRICS_PERSIST_PATH", "data/micro_metrics.json")
+    MICRO_METRICS_SAVE_INTERVAL_SEC = int(os.getenv("MICRO_METRICS_SAVE_INTERVAL_SEC", "60"))
+    MICRO_BACKGROUND_REFRESH_SEC = int(os.getenv("MICRO_BACKGROUND_REFRESH_SEC", "60"))
+    MICRO_BACKGROUND_SYMBOL_LIMIT = int(os.getenv("MICRO_BACKGROUND_SYMBOL_LIMIT", "12"))
+    
     @classmethod
     def validate(cls) -> bool:
         """Validate that all required API keys are present"""

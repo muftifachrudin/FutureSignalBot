@@ -1,9 +1,11 @@
-"""
-Improved signal generation logic using working APIs only
-"""
+"""Improved signal generation logic using working APIs only (extended with micro metrics persistence & background refresh)."""
 import time
 import logging
-from typing import Dict, List, Optional, Any, TypedDict, Type, Protocol, runtime_checkable, cast, Mapping, Tuple
+import json
+import asyncio
+from pathlib import Path
+from collections import deque, defaultdict
+from typing import Dict, List, Optional, Any, TypedDict, Type, Protocol, runtime_checkable, cast, Mapping, Tuple, Deque
 from types import TracebackType
 from mexc_client import MEXCClient
 from coinglass_client import CoinglassClient
@@ -40,13 +42,273 @@ class AsyncContextManagerLike(Protocol):
     async def __aexit__(self, exc_type: Optional[Type[BaseException]], exc_val: Optional[BaseException], exc_tb: Optional[TracebackType]) -> None: ...
 class PairsCache:
     def __init__(self):
-        self.mexc_client: Optional[AsyncContextManagerLike] = None
-        self.coinglass_client: Optional[AsyncContextManagerLike] = None
-        self.gemini_analyzer = GeminiAnalyzer()
-        # caches and rate-limit tracking
-        self.last_request_time: Dict[str, float] = {}
-        self.signal_cache: Dict[str, Dict[str, Any]] = {}
-        self._pairs_cache: PairsCacheData = {"ts": 0.0, "data": []}
+            self.mexc_client: Optional[AsyncContextManagerLike] = None
+            self.coinglass_client: Optional[AsyncContextManagerLike] = None
+            self.gemini_analyzer = GeminiAnalyzer()
+            # caches and rate-limit tracking
+            self.last_request_time: Dict[str, float] = {}
+            self.signal_cache: Dict[str, Dict[str, Any]] = {}
+            self._pairs_cache: PairsCacheData = {"ts": 0.0, "data": []}
+            # micro metrics store (symbol -> deques)
+            self._micro_prices: Dict[str, Deque[float]] = {}
+            self._micro_highs: Dict[str, Deque[float]] = {}
+            self._micro_lows: Dict[str, Deque[float]] = {}
+            self._micro_volumes: Dict[str, Deque[float]] = {}
+            self._micro_times: Dict[str, Deque[float]] = {}
+            self._micro_tr: Dict[str, Deque[float]] = {}  # true ranges for 1m ATR
+            # persistence & background loop
+            self._last_persist_ts: float = 0.0
+            self._bg_task = None  # background asyncio task
+
+    # -------------- Micro Metrics Helpers --------------
+    def _init_micro_store(self, symbol: str):
+        maxlen = max(10, int(Config.MICRO_METRICS_RETENTION_MINUTES))
+        if symbol not in self._micro_prices:
+            self._micro_prices[symbol] = deque(maxlen=maxlen)
+            self._micro_highs[symbol] = deque(maxlen=maxlen)
+            self._micro_lows[symbol] = deque(maxlen=maxlen)
+            self._micro_volumes[symbol] = deque(maxlen=maxlen)
+            self._micro_times[symbol] = deque(maxlen=maxlen)
+            self._micro_tr[symbol] = deque(maxlen=maxlen)
+
+    def _update_micro_metrics_from_1m(self, symbol: str, klines: List[List[Any]]):
+        if not klines:
+            return
+        self._init_micro_store(symbol)
+        prices = self._micro_prices[symbol]
+        highs = self._micro_highs[symbol]
+        lows = self._micro_lows[symbol]
+        vols = self._micro_volumes[symbol]
+        tsq = self._micro_times[symbol]
+        trq = self._micro_tr[symbol]
+        # ensure chronological
+        klines_sorted = sorted(klines, key=lambda k: k[0])[-Config.MICRO_METRICS_RETENTION_MINUTES:]
+        prev_close = prices[-1] if prices else None
+        existing_ts = set(tsq)
+        for k in klines_sorted:
+            try:
+                t = float(k[0])
+                if t in existing_ts:
+                    continue
+                high = float(k[2]); low = float(k[3]); close = float(k[4]); vol = float(k[5]) if len(k) >5 else 0.0
+                prices.append(close)
+                highs.append(high)
+                lows.append(low)
+                vols.append(vol)
+                tsq.append(t)
+                if prev_close is None:
+                    prev_close = close
+                tr = max(high-low, abs(high-prev_close), abs(low-prev_close))
+                trq.append(tr)
+                prev_close = close
+            except Exception:
+                continue
+
+    def _compute_atr1m(self, symbol: str) -> float:
+        trq = self._micro_tr.get(symbol)
+        prices = self._micro_prices.get(symbol)
+        if not trq or not prices:
+            return 0.0
+        period = max(2, int(Config.ATR1M_PERIOD))
+        if len(trq) < period:
+            return 0.0
+        atr = sum(list(trq)[-period:]) / period
+        last_price = prices[-1] if prices else 1.0
+        if last_price <= 0:
+            return 0.0
+        return (atr / last_price) * 100.0
+
+    def _compute_volume_profile(self, symbol: str) -> Optional[Dict[str, Any]]:
+        if not Config.ENABLE_VOLUME_PROFILE_SCALP:
+            return None
+        prices = self._micro_prices.get(symbol)
+        vols = self._micro_volumes.get(symbol)
+        highs = self._micro_highs.get(symbol)
+        lows = self._micro_lows.get(symbol)
+        if not prices or not vols or len(prices) < 10 or not highs or not lows:
+            return None
+        try:
+            pmin = min(lows)
+            pmax = max(highs)
+            if pmax <= pmin:
+                return None
+            buckets = max(6, min(200, int(Config.VOLUME_PROFILE_BUCKETS)))
+            step = (pmax - pmin) / buckets
+            hist: Dict[int, float] = defaultdict(float)
+            # approximate: assign each close's volume to bucket
+            for price, vol in zip(prices, vols):
+                idx = int((price - pmin) / step)
+                if idx >= buckets:
+                    idx = buckets -1
+                hist[idx] += vol
+            # find POC and high/low volume nodes
+            if not hist:
+                return None
+            poc_idx = max(hist.items(), key=lambda x: x[1])[0]
+            poc_price = pmin + poc_idx * step + step/2
+            # compute top 3 buckets
+            sorted_hist = sorted(hist.items(), key=lambda x: x[1], reverse=True)
+            hvn_prices = [pmin + idx*step + step/2 for idx,_ in sorted_hist[:3]]
+            lvn_prices = [pmin + idx*step + step/2 for idx,_ in sorted(hist.items(), key=lambda x: x[1])[:2]]
+            return {
+                'poc': poc_price,
+                'hvn': hvn_prices,
+                'lvn': lvn_prices,
+                'range_pct': ((pmax - pmin)/prices[-1])*100 if prices[-1]>0 else 0
+            }
+        except Exception:
+            return None
+
+    async def get_scalp_snapshot(self, symbol: str) -> Optional[str]:
+        """Produce a concise scalping snapshot leveraging micro metrics.
+        Returns markdown string.
+        """
+        # fetch latest 1m klines to update store
+        try:
+            if self.mexc_client:
+                kl = await cast(Any, self.mexc_client).get_klines(symbol, '1m', limit=Config.ATR1M_PERIOD + 20)
+            else:
+                kl = []
+        except Exception:
+            kl = []
+        self._update_micro_metrics_from_1m(symbol, cast(List[List[Any]], kl or []))
+        atr1m = self._compute_atr1m(symbol)
+        vol_prof = self._compute_volume_profile(symbol)
+        # basic price/funding snapshot reuse core data function (cached inside call chain) for accuracy
+        data = await self._get_reliable_market_data(symbol)
+        ticker = cast(Dict[str, Any], data.get('mexc_ticker') or {})
+        price = ticker.get('lastPrice')
+        change_pct = ticker.get('priceChangePercent')
+        cg_summary: Dict[str, Any] = cast(Dict[str, Any], data.get('coinglass_summary') or {})
+        funding = cg_summary.get('funding_rate')
+        oi_chg = cg_summary.get('oi_change_24h')
+        lsr = cg_summary.get('long_short_ratio')
+        # derive bias
+        try:
+            ch = float(change_pct or 0)
+            fr = float(funding or 0)
+            oi = float(oi_chg or 0)
+        except Exception:
+            ch = 0; fr =0; oi=0
+        bias = 'NETRAL'
+        if ch > 0.4 and fr >= 0 and oi > 0:
+            bias = 'BULLISH'
+        elif ch < -0.4 and fr <= 0 and oi < 0:
+            bias = 'BEARISH'
+        # risk sizing derived from 1m ATR
+        stop_pct = atr1m * 0.8 if atr1m else 0.15
+        tp_pct = stop_pct * (1.4 if bias in ('BULLISH','BEARISH') else 1.2)
+        # adjust for crowded ratio
+        try:
+            if lsr is not None:
+                lsr_f = float(lsr)
+                if lsr_f > 0.65 or lsr_f < 0.35:
+                    stop_pct *= 0.9; tp_pct *= 1.05
+        except Exception:
+            pass
+        lines: List[str] = []
+        lines.append(f"🎯 *Scalp {symbol}* | Bias: {bias}")
+        if price:
+            lines.append(f"Harga: {price} ({(float(change_pct) if change_pct else 0):+.2f}%)")
+        lines.append(f"Funding: {float(funding or 0):.4f} | OI 24j: {float(oi_chg or 0):+.2f}%")
+        if lsr is not None:
+            try:
+                lines.append(f"Long/Short: {float(lsr):.2f}")
+            except Exception:
+                pass
+        lines.append(f"ATR 1m({Config.ATR1M_PERIOD}): {atr1m:.2f}%")
+        lines.append(f"Stop≈ {stop_pct:.2f}% | TP≈ {tp_pct:.2f}% (R~1:{(tp_pct/stop_pct):.2f})")
+        if vol_prof:
+            try:
+                poc = vol_prof.get('poc')
+                hvn = vol_prof.get('hvn')
+                lvn = vol_prof.get('lvn')
+                lines.append(f"POC: {poc:.2f}")
+                if hvn:
+                    lines.append("HVN: " + ", ".join(f"{v:.2f}" for v in hvn))
+                if lvn:
+                    lines.append("LVN: " + ", ".join(f"{v:.2f}" for v in lvn))
+            except Exception:
+                pass
+        lines.append("Catatan: Gunakan konfirmasi momentum 1-5m & order book.")
+        snapshot = "\n".join(lines)
+        if len(snapshot) > Config.SCALP_MAX_MESSAGE_LEN:
+            snapshot = snapshot[:Config.SCALP_MAX_MESSAGE_LEN]
+        return snapshot
+
+    # -------------- Persistence & Background Refresh --------------
+    def _load_micro_metrics(self) -> None:
+        path = Path(Config.MICRO_METRICS_PERSIST_PATH)
+        if not path.is_file():
+            return
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            retention = max(10, int(Config.MICRO_METRICS_RETENTION_MINUTES))
+            for sym, payload_any in data.items():
+                if not isinstance(payload_any, dict):
+                    continue
+                payload = cast(Dict[str, Any], payload_any)
+                try:
+                    self._micro_prices[sym] = deque(payload.get('prices', [])[-retention:], maxlen=retention)
+                    self._micro_highs[sym] = deque(payload.get('highs', [])[-retention:], maxlen=retention)
+                    self._micro_lows[sym] = deque(payload.get('lows', [])[-retention:], maxlen=retention)
+                    self._micro_volumes[sym] = deque(payload.get('vols', [])[-retention:], maxlen=retention)
+                    self._micro_times[sym] = deque(payload.get('times', [])[-retention:], maxlen=retention)
+                    self._micro_tr[sym] = deque(payload.get('trs', [])[-retention:], maxlen=retention)
+                except Exception:
+                    continue
+            logger.info("Micro metrics loaded from persistence store")
+        except Exception as e:
+            logger.warning(f"Failed loading micro metrics: {e}")
+
+    def _save_micro_metrics(self, force: bool = False) -> None:
+        now = time.time()
+        if not force and (now - self._last_persist_ts) < Config.MICRO_METRICS_SAVE_INTERVAL_SEC:
+            return
+        path = Path(Config.MICRO_METRICS_PERSIST_PATH)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            blob: Dict[str, Any] = {}
+            for sym in self._micro_prices:
+                blob[sym] = {
+                    'prices': list(self._micro_prices[sym]),
+                    'highs': list(self._micro_highs[sym]),
+                    'lows': list(self._micro_lows[sym]),
+                    'vols': list(self._micro_volumes[sym]),
+                    'times': list(self._micro_times[sym]),
+                    'trs': list(self._micro_tr[sym]),
+                }
+            tmp = path.with_suffix('.tmp')
+            tmp.write_text(json.dumps(blob), encoding='utf-8')
+            tmp.replace(path)
+            self._last_persist_ts = now
+        except Exception as e:
+            logger.warning(f"Failed saving micro metrics: {e}")
+
+    async def _background_refresh_loop(self):
+        interval = max(15, int(Config.MICRO_BACKGROUND_REFRESH_SEC))
+        while True:
+            try:
+                # choose most recently requested symbols
+                ordered = sorted(self.last_request_time.items(), key=lambda x: x[1], reverse=True)
+                symbols = [s for s, _ in ordered[:Config.MICRO_BACKGROUND_SYMBOL_LIMIT]]
+                for sym in symbols:
+                    try:
+                        if self.mexc_client:
+                            kl = await cast(Any, self.mexc_client).get_klines(sym, '1m', limit=Config.ATR1M_PERIOD + 5)
+                        else:
+                            kl = []
+                        self._update_micro_metrics_from_1m(sym, cast(List[List[Any]], kl or []))
+                    except Exception:
+                        continue
+                self._save_micro_metrics()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+            await asyncio.sleep(interval)
+
+    # (context manager methods defined later in file)
 
     # --- Helper extractors (placed before usage to satisfy type analyzers) ---
     def _extract_funding_from_response(self, data: Any) -> Tuple[float, List[float]]:
@@ -224,12 +486,25 @@ class PairsCache:
     async def __aenter__(self):
         self.mexc_client = cast(AsyncContextManagerLike, MEXCClient())
         self.coinglass_client = cast(AsyncContextManagerLike, CoinglassClient())
+        # load persisted micro metrics and launch background loop
+        self._load_micro_metrics()
+        try:
+            if self._bg_task is None:
+                self._bg_task = asyncio.create_task(self._background_refresh_loop())
+        except Exception:
+            pass
         return self
     async def __aexit__(self, exc_type: Optional[Type[BaseException]], exc_val: Optional[BaseException], exc_tb: Optional[TracebackType]) -> None:
         if self.mexc_client:
             await self.mexc_client.__aexit__(exc_type, exc_val, exc_tb)
         if self.coinglass_client:
             await self.coinglass_client.__aexit__(exc_type, exc_val, exc_tb)
+        try:
+            if self._bg_task:
+                self._bg_task.cancel()
+        except Exception:
+            pass
+        self._save_micro_metrics(force=True)
     
     def _should_generate_signal(self, symbol: str) -> bool:
         """Check rate limiting"""
@@ -1052,19 +1327,146 @@ Format keluaran:
         """
         try:
             market_data = await self._get_reliable_market_data(symbol)
+            # Pre-compute structured metrics for local enrichment
+            ticker = cast(Dict[str, Any], market_data.get('mexc_ticker') or {})
+            cg_summary: Dict[str, Any] = cast(Dict[str, Any], market_data.get('coinglass_summary') or {})
+            last_price = None
+            change_pct = 0.0
+            high_price = None
+            low_price = None
+            try:
+                if ticker:
+                    last_price = float(ticker.get('lastPrice') or 0)
+                    change_pct = float(ticker.get('priceChangePercent') or 0)
+                    high_price = float(ticker.get('highPrice') or 0)
+                    low_price = float(ticker.get('lowPrice') or 0)
+            except Exception:
+                pass
+            daily_range_pct = 0.0
+            if last_price and high_price and low_price and last_price > 0:
+                try:
+                    daily_range_pct = ((high_price - low_price) / last_price) * 100.0
+                except Exception:
+                    daily_range_pct = 0.0
+            funding_rate = float(cg_summary.get('funding_rate') or 0.0)
+            oi_change = float(cg_summary.get('oi_change_24h') or 0.0)
+            lsr = cg_summary.get('long_short_ratio')
+            try:
+                lsr_f = float(lsr) if lsr is not None else None
+            except Exception:
+                lsr_f = None
+
+            def _classify_vol(r: float) -> str:
+                if r > 7: return 'SANGAT TINGGI'
+                if r > 5: return 'TINGGI'
+                if r > 3: return 'MENENGAH'
+                if r > 1.5: return 'RENDAH'
+                return 'SANGAT RENDAH'
+
+            vol_class = _classify_vol(daily_range_pct)
+
+            # Short-term (scalping) directional bias heuristic
+            bias = 'NETRAL'
+            if change_pct > 0.6 and funding_rate >= 0 and oi_change > 0:  # sustained interest up
+                bias = 'BULLISH INTRADAY'
+            elif change_pct < -0.6 and funding_rate <= 0 and oi_change < 0:
+                bias = 'BEARISH INTRADAY'
+            elif abs(change_pct) > 0.4:
+                bias = 'MODERAT ' + ('BULLISH' if change_pct > 0 else 'BEARISH')
+
+            # Suggested scalping setup (pure heuristic – educational)
+            scalping_lines: List[str] = []
+            if last_price:
+                # Dynamic micro volatility baseline
+                micro_vol = max(0.08, min(0.25, daily_range_pct / 20))  # percent of price as base risk window
+                stop_pct = micro_vol * (1.2 if vol_class in ('TINGGI','SANGAT TINGGI') else 0.9)
+                tp_pct = stop_pct * (1.4 if bias.startswith('BULLISH') or bias.startswith('BEARISH') else 1.2)
+                # If long/short ratio extreme, adjust risk (contrarian caution)
+                if lsr_f is not None:
+                    if lsr_f > 0.65:  # long crowded
+                        stop_pct *= 0.9
+                        tp_pct *= 1.05
+                    elif lsr_f < 0.35:  # short crowded
+                        stop_pct *= 0.9
+                        tp_pct *= 1.05
+                def _fmt(p: float) -> str:
+                    return f"{p:.2f}%"
+                # Position bias and invalidation hint
+                if bias.startswith('BULLISH'):
+                    scalping_lines.append(f"Bias: 🟢 {bias}")
+                elif bias.startswith('BEARISH'):
+                    scalping_lines.append(f"Bias: 🔴 {bias}")
+                else:
+                    scalping_lines.append(f"Bias: ⚪ {bias}")
+                scalping_lines.append(f"Volatilitas Harian: {vol_class} (~{daily_range_pct:.2f}%)")
+                if funding_rate:
+                    scalping_lines.append(f"Funding: {funding_rate:.4f} ({'positif' if funding_rate>0 else 'negatif'})")
+                if oi_change:
+                    scalping_lines.append(f"OI 24j: {oi_change:+.2f}%")
+                if lsr_f is not None:
+                    scalping_lines.append(f"Rasio Long/Short: {lsr_f:.2f}")
+                scalping_lines.append(f"Rasio R/R target: ~1:{(tp_pct/stop_pct):.2f}")
+                scalping_lines.append(f"Stop (perkiraan): {_fmt(stop_pct)} | TP awal: {_fmt(tp_pct)}")
+                scalping_lines.append("Gunakan konfirmasi order book / momentum 1-5m.")
+
+            indicator_summary: List[str] = []
+            if last_price:
+                indicator_summary.append(f"Harga: ${last_price:.2f}")
+            indicator_summary.append(f"Perubahan 24j: {change_pct:+.2f}%")
+            indicator_summary.append(f"Range 24j: {daily_range_pct:.2f}% ({vol_class})")
+            indicator_summary.append(f"Funding: {funding_rate:.4f}")
+            indicator_summary.append(f"OI 24j: {oi_change:+.2f}%")
+            if lsr_f is not None:
+                indicator_summary.append(f"Long/Short: {lsr_f:.2f}")
+            # --- Micro (1m) Volume Profile & ATR Integration ---
+            micro_lines: List[str] = []
+            if Config.ENABLE_VOLUME_PROFILE_EXPLANATION:
+                try:
+                    vp = self._compute_volume_profile(symbol)
+                    atr1m = self._compute_atr1m(symbol)
+                    if atr1m:
+                        micro_lines.append(f"ATR1m: {atr1m:.2f}%")
+                    if vp and last_price:
+                        poc = vp.get('poc')
+                        rngp = vp.get('range_pct')
+                        if isinstance(poc, (int,float)) and poc > 0 and last_price > 0:
+                            diff_poc = (last_price - poc)/last_price * 100.0
+                            micro_lines.append(f"POC: {poc:.2f} (Δ{diff_poc:+.2f}%)")
+                        if isinstance(rngp, (int,float)) and rngp >= 0:
+                            micro_lines.append(f"VRng: {rngp:.2f}%")
+                except Exception:
+                    pass
+            if micro_lines:
+                # append micro metrics compactly
+                indicator_summary.append(" | ".join(micro_lines))
+            indicator_block = " • ".join(indicator_summary)
 
             # Try Gemini explanation first
             try:
+                micro_for_ai = ''
+                try:
+                    if micro_lines and Config.ENABLE_VOLUME_PROFILE_EXPLANATION:
+                        micro_for_ai = "\nMicro Profil: " + "; ".join(micro_lines)
+                except Exception:
+                    micro_for_ai = ''
                 gemini_prompt = (
                     f"Ringkas kondisi pasar untuk {symbol} berdasarkan data berikut.\n"
                     f"Ticker MEXC: {market_data.get('mexc_ticker', {})}\n"
                     f"Jumlah entri Coinglass: {len(market_data.get('coinglass_markets', []))}\n"
-                    "Berikan ringkasan singkat (<= 3 kalimat) dalam bahasa Indonesia."
+                    f"Indikator Lokal: {indicator_block}{micro_for_ai}\n"
+                    "Berikan ringkasan singkat (<= 4 kalimat) dalam bahasa Indonesia. "
+                    "Sertakan heading 'Update Pasar' lalu bagian 'Indikator Kunci:' dengan bullet ringkas jika cukup ruang."
                 )
                 resp = await self.gemini_analyzer.explain_market_conditions(symbol, {'analysis': gemini_prompt})
                 # Treat empty or geo-block error responses as fallback triggers
                 if resp and 'FAILED_PRECONDITION' not in resp and 'lokasi' not in resp.lower() and 'location is not supported' not in resp.lower():
-                    return resp[:500]
+                    trimmed = resp[:1200]
+                    needs_indicators = 'Indikator Kunci' not in trimmed or trimmed.strip().endswith(':') or trimmed.strip().endswith('Kunci')
+                    if needs_indicators:
+                        trimmed += f"\n\n**Indikator Kunci (Heuristik Lokal):**\n{indicator_block}"
+                    if scalping_lines:
+                        trimmed += "\n\n**Scalping Setup (Eksperimental):**\n" + "\n".join(f"- {l}" for l in scalping_lines)
+                    return trimmed
                 else:
                     if resp:
                         logger.info("Gemini response indicates geo-block or error; using fallback summary.")
@@ -1094,17 +1496,19 @@ Format keluaran:
                 change_pct = 0.0
 
             parts: List[str] = []
-            last_price = ticker.get('lastPrice')
-            if last_price:
-                parts.append(f"Harga: ${last_price} | 24j: {change_pct:.2f}%")
+            lp = ticker.get('lastPrice')
+            if lp:
+                parts.append(f"Harga: ${lp} ({change_pct:+.2f}%)")
             if funding_rate:
-                parts.append(f"Funding: {funding_rate:.4%}")
+                parts.append(f"Funding: {funding_rate:.4f}")
             if oi_change:
-                parts.append(f"OI 24j: {oi_change:.2f}%")
-
-            sentiment_hint = "Kondisi netral."
-            summary = " | ".join(parts) if parts else "Data terbatas tersedia."
-            return f"{summary} | {sentiment_hint}"
+                parts.append(f"OI 24j: {oi_change:+.2f}%")
+            parts.append(f"Range: {daily_range_pct:.2f}% ({vol_class})")
+            base_summary = " | ".join(parts) if parts else "Data terbatas tersedia."
+            enriched = base_summary + f"\n\n**Indikator Kunci (Heuristik Lokal):**\n{indicator_block}"
+            if scalping_lines:
+                enriched += "\n\n**Scalping Setup (Eksperimental):**\n" + "\n".join(f"- {l}" for l in scalping_lines)
+            return enriched
         except Exception as e:
             logger.error(f"Failed to build market explanation for {symbol}: {e}")
             return "Penjelasan pasar tidak tersedia saat ini."

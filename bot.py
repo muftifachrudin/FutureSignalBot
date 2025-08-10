@@ -197,6 +197,7 @@ class TradingSignalBot:
         application.add_handler(CommandHandler("start", self.start_command))
         application.add_handler(CommandHandler("help", self.help_command))
         application.add_handler(CommandHandler("signal", self.signal_command))
+        application.add_handler(CommandHandler("scalp", self.scalp_command))
         application.add_handler(CommandHandler("analyze", self.analyze_command))
         application.add_handler(CommandHandler("pairs", self.pairs_command))
         application.add_handler(CommandHandler("pairs_add", self.pairs_add_command))
@@ -466,6 +467,48 @@ class TradingSignalBot:
             await processing_msg.edit_text(truncate_text(message), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
         else:
             await processing_msg.edit_text(format_error_message("Gagal membuat sinyal.", symbol), parse_mode='Markdown')
+
+    async def scalp_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        if not msg:
+            return
+        if not context.args:
+            await msg.reply_text(
+                "❌ Mohon sertakan simbol trading.\n\n**Contoh:** `/scalp BTCUSDT`",
+                parse_mode='Markdown'
+            )
+            return
+        symbol = validate_symbol(context.args[0])
+        processing_msg = await msg.reply_text(
+            f"⚡ **Scalping snapshot {symbol}...**",
+            parse_mode='Markdown'
+        )
+        try:
+            assert self.signal_generator is not None
+            # dynamic check if generator has get_scalp_snapshot
+            gen = self.signal_generator
+            if hasattr(gen, 'get_scalp_snapshot'):
+                snapshot = await cast(Any, gen).get_scalp_snapshot(symbol)
+            else:
+                snapshot = None
+            if snapshot:
+                keyboard = [
+                    [InlineKeyboardButton("🔄 Refresh", callback_data=f"signal_{symbol}"),
+                     InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}")],
+                    [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
+                ]
+                await processing_msg.edit_text(truncate_text(snapshot), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            else:
+                await processing_msg.edit_text(
+                    format_error_message("Gagal membuat snapshot scalping (fitur belum siap).", symbol),
+                    parse_mode='Markdown'
+                )
+        except Exception as e:
+            logger.error(f"Error scalp command {symbol}: {e}")
+            await processing_msg.edit_text(
+                format_error_message("Kesalahan saat membuat snapshot scalping.", symbol),
+                parse_mode='Markdown'
+            )
 
     async def analyze_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
