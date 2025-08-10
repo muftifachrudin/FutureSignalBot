@@ -4,16 +4,18 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Environments
+# Environments & secrets
 .venv/
 venv/
+# Ignore all env/secret files except template example
 .env
 .env.*
 *.env
+!env.example
+!.env.example
 
-# Logs
+# Logs & runtime artifacts
 *.log
-bot.log
 logs/
 .bot.lock
 .local/
@@ -31,3 +33,4 @@ Thumbs.db
 
 # Caches
 *.cache
+pairs_watchlist.json

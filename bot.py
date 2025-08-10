@@ -28,6 +28,7 @@ from utils import (
     truncate_text,
     validate_symbol,
 )
+from pairs_store import PairsStore
 
 # Initialize module-level logger
 logging.basicConfig(level=logging.INFO)
@@ -136,6 +137,12 @@ class TradingSignalBot:
         # Fully parameterize Application generics to avoid Unknown types from stubs
         self.application: Optional[Application[Any, Any, Any, Any, Any, Any]] = None
         self.signal_generator: Optional[SignalGeneratorProtocol] = None
+        # Dynamic pairs store (admin-managed watchlist)
+        try:
+            path = getattr(Config, 'PAIRS_WATCHLIST_PATH', '') or None
+        except Exception:
+            path = None
+        self.pairs_store: PairsStore = PairsStore(path)
 
     def run(self) -> None:
         """Run the bot using Application.run_polling (blocking)."""
@@ -191,6 +198,8 @@ class TradingSignalBot:
         application.add_handler(CommandHandler("signal", self.signal_command))
         application.add_handler(CommandHandler("analyze", self.analyze_command))
         application.add_handler(CommandHandler("pairs", self.pairs_command))
+    application.add_handler(CommandHandler("pairs_add", self.pairs_add_command))
+    application.add_handler(CommandHandler("pairs_remove", self.pairs_remove_command))
         application.add_handler(CommandHandler("timeframes", self.timeframes_command))
         application.add_handler(CommandHandler("about", self.about_command))
         application.add_handler(CallbackQueryHandler(self.button_callback))
@@ -365,18 +374,67 @@ class TradingSignalBot:
         if not msg:
             return
         processing_msg = await msg.reply_text("🔄 **Memuat daftar pasangan yang didukung...**", parse_mode='Markdown')
-        assert self.signal_generator is not None
-        pairs = await self.signal_generator.get_supported_pairs()
-        if pairs:
-            message = format_pairs_list(pairs)
-            keyboard = [
-                [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data="get_signal_input")],
-                [InlineKeyboardButton("🔄 Muat Ulang", callback_data="refresh_pairs")],
-                [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
-            ]
-            await processing_msg.edit_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        # Combine dynamic watchlist with exchange supported (intersection to avoid stale)
+        try:
+            assert self.signal_generator is not None
+            supported = set(await self.signal_generator.get_supported_pairs())
+        except Exception:
+            supported = set()
+        watchlist = await self.pairs_store.get_pairs()
+        display_pairs = [p for p in watchlist if p in supported] or watchlist
+        message = format_pairs_list(display_pairs)
+        admin_hint = ""
+        if self._is_admin(update):
+            admin_hint = ("\n\n🔧 Admin: gunakan /pairs_add SYMBOL atau /pairs_remove SYMBOL."
+                          " Contoh: /pairs_add ARBUSDT")
+        message += admin_hint
+        keyboard = [
+            [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data="get_signal_input")],
+            [InlineKeyboardButton("🔄 Muat Ulang", callback_data="refresh_pairs")],
+            [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
+        ]
+        await processing_msg.edit_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    def _is_admin(self, update: Update) -> bool:
+        try:
+            user_id = update.effective_user.id if update.effective_user else None
+        except Exception:
+            return False
+        return bool(user_id and user_id in getattr(Config, 'ADMIN_USER_IDS', []))
+
+    async def pairs_add_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        if not msg:
+            return
+        if not self._is_admin(update):
+            await msg.reply_text("❌ Akses ditolak. Hanya admin yang dapat menambah pasangan.")
+            return
+        if not context.args:
+            await msg.reply_text("Gunakan: /pairs_add SYMBOL (mis. /pairs_add ARBUSDT)")
+            return
+        symbol = validate_symbol(context.args[0])
+        added = await self.pairs_store.add_pair(symbol)
+        if added:
+            await msg.reply_text(f"✅ Ditambahkan: {symbol}")
         else:
-            await processing_msg.edit_text(format_error_message("Gagal memuat daftar pasangan."), parse_mode='Markdown')
+            await msg.reply_text(f"⚠️ Gagal menambah {symbol}. Mungkin sudah ada atau simbol tidak valid.")
+
+    async def pairs_remove_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        if not msg:
+            return
+        if not self._is_admin(update):
+            await msg.reply_text("❌ Akses ditolak. Hanya admin yang dapat menghapus pasangan.")
+            return
+        if not context.args:
+            await msg.reply_text("Gunakan: /pairs_remove SYMBOL (mis. /pairs_remove ARBUSDT)")
+            return
+        symbol = validate_symbol(context.args[0])
+        removed = await self.pairs_store.remove_pair(symbol)
+        if removed:
+            await msg.reply_text(f"🗑️ Dihapus: {symbol}")
+        else:
+            await msg.reply_text(f"⚠️ {symbol} tidak ditemukan di watchlist.")
 
     async def signal_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
