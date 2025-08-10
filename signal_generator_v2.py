@@ -1001,8 +1001,12 @@ Consider: trend strength, momentum, funding rates, and open interest changes.
                     "Berikan ringkasan singkat (<= 3 kalimat) dalam bahasa Indonesia."
                 )
                 resp = await self.gemini_analyzer.explain_market_conditions(symbol, {'analysis': gemini_prompt})
-                if resp.strip():
+                # Treat empty or geo-block error responses as fallback triggers
+                if resp and 'FAILED_PRECONDITION' not in resp and 'lokasi' not in resp.lower() and 'location is not supported' not in resp.lower():
                     return resp[:500]
+                else:
+                    if resp:
+                        logger.info("Gemini response indicates geo-block or error; using fallback summary.")
             except Exception as e:
                 logger.warning(f"Gemini explanation failed for {symbol}: {e}")
 

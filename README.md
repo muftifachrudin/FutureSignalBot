@@ -107,8 +107,10 @@ Catatan:
 - `services/` — Klien API (Coinglass v4, MEXC .fm)
 - `scripts/quick_signal_test.py` — Uji metrik cepat untuk simbol
 - `logs/` — Output log
-  \n+## Deploy di Linux VM (systemd)
-  Contoh: Ubuntu 22.04, jalankan 24/7 dengan systemd.
+
+## Deploy di Linux VM (systemd)
+
+Contoh: Ubuntu 22.04, jalankan 24/7 dengan systemd.
 
 ### 1. User & Direktori
 
@@ -182,6 +184,49 @@ Image sudah mengabaikan `.env` (lihat `.dockerignore`).
 - User non-login (`fsbot`) membatasi akses.
 - `Restart=on-failure` otomatis restart saat crash.
 - Gunakan firewall & rotasi log bila beban tinggi.
+
+## Azure VM (Cepat) – Region Gemini Friendly
+
+Region direkomendasikan: `eastus`, `eastus2`, `westeurope`, `northeurope`, `westus3`.
+
+### Opsi A: Cloud-init Saat Membuat VM
+
+Gunakan file `infra/cloud-init-fsbot.yaml` (edit placeholder token & SSH key).
+
+Contoh (portal atau CLI --custom-data): pastikan ganti `REPLACE_...`.
+
+### Opsi B: Script Manual
+
+Setelah VM siap dan Anda SSH masuk:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/muftifachrudin/FutureSignalBot/main/scripts/setup_fsbot_vm.sh -o setup_fsbot_vm.sh
+sudo bash setup_fsbot_vm.sh
+sudo nano /etc/futuresignalbot.env   # isi secrets
+sudo systemctl start futuresignalbot.service
+sudo systemctl status futuresignalbot.service
+```
+
+### Cek Log Runtime
+
+```bash
+journalctl -u futuresignalbot.service -f
+```
+
+### Update Kode
+
+```bash
+sudo systemctl stop futuresignalbot.service
+cd /opt/futuresignalbot && sudo -u fsbot git pull --ff-only
+sudo systemctl start futuresignalbot.service
+```
+
+### Gemini Geo Block
+
+Jika muncul `FAILED_PRECONDITION` terkait lokasi:
+
+- Migrasi VM ke region yang didukung.
+- Atau gunakan proxy outbound (SOCKS/HTTPS) ke region diperbolehkan.
 
 ## Keamanan
 

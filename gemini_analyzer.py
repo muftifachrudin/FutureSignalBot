@@ -212,5 +212,13 @@ class GeminiAnalyzer:
             return text or "Tidak dapat menganalisis kondisi pasar saat ini."
             
         except Exception as e:
+            msg = str(e)
+            # Detect geo/location restriction (FAILED_PRECONDITION / location not supported)
+            lowered = msg.lower()
+            if ("failed_precondition" in lowered and "location" in lowered) or ("location is not supported" in lowered):
+                logger.warning("Gemini geo/location restriction detected – disabling AI features and falling back to internal summary.")
+                # Disable client for remainder of runtime to skip future calls quickly
+                self.client = None
+                return ""  # Return empty so caller can trigger fallback summary
             logger.error(f"Error explaining market conditions: {e}")
-            return f"Gagal menganalisis kondisi pasar untuk {symbol}: {str(e)}"
+            return ""  # Empty triggers caller fallback instead of exposing raw error

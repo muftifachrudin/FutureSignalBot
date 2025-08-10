@@ -1,0 +1,78 @@
+## cloud-init for FutureSignalBot VM
+#cloud-config
+hostname: fsbot-vm
+manage_etc_hosts: true
+
+users:
+	- name: fsbot
+		groups: sudo
+		shell: /bin/bash
+		sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+
+package_update: true
+package_upgrade: true
+packages:
+	- git
+	- python3
+	- python3-venv
+	- python3-pip
+	- ca-certificates
+	- tzdata
+
+write_files:
+	- path: /etc/futuresignalbot.env
+		owner: root:root
+		permissions: '0600'
+		content: |
+			# Populate secrets then: systemctl restart futuresignalbot.service
+			TELEGRAM_BOT_TOKEN=
+			MEXC_API_KEY=
+			MEXC_SECRET_KEY=
+			COINGLASS_API_KEY=
+			GEMINI_API_KEY=
+			TZ=Asia/Jakarta
+	- path: /etc/systemd/system/futuresignalbot.service
+		owner: root:root
+		permissions: '0644'
+		content: |
+			[Unit]
+			Description=Future Signal Bot (MEXC Futures Telegram Bot)
+			After=network-online.target
+			Wants=network-online.target
+			StartLimitIntervalSec=60
+			StartLimitBurst=3
+
+			[Service]
+			Type=simple
+			WorkingDirectory=/opt/futuresignalbot
+			ExecStart=/opt/futuresignalbot/.venv/bin/python -m main
+			Restart=on-failure
+			RestartSec=10
+			User=fsbot
+			Group=fsbot
+			EnvironmentFile=/etc/futuresignalbot.env
+			NoNewPrivileges=true
+			PrivateTmp=true
+			ProtectSystem=full
+			ProtectHome=true
+			LimitNOFILE=65535
+			KillSignal=SIGINT
+			# Delay start until env file has TELEGRAM_BOT_TOKEN set
+			ExecStartPre=/bin/bash -c 'grep -q "^TELEGRAM_BOT_TOKEN=.\+" /etc/futuresignalbot.env'
+
+			[Install]
+			WantedBy=multi-user.target
+
+runcmd:
+	- timedatectl set-timezone Asia/Jakarta || true
+	- mkdir -p /opt && chown fsbot:fsbot /opt
+	- cd /opt && sudo -u fsbot git clone https://github.com/muftifachrudin/FutureSignalBot.git futuresignalbot
+	- cd /opt/futuresignalbot && sudo -u fsbot python3 -m venv .venv
+	- cd /opt/futuresignalbot && ./.venv/bin/pip install --upgrade pip wheel
+	- cd /opt/futuresignalbot && ./.venv/bin/pip install -r requirements.txt || true
+	- systemctl daemon-reload
+	- systemctl enable futuresignalbot.service
+	# Service will start only after you add secrets & restart manually
+	- echo 'Cloud-init provisioning completed. Add secrets to /etc/futuresignalbot.env then: systemctl restart futuresignalbot.service' > /etc/motd
+
+final_message: "cloud-init: FutureSignalBot base provisioning complete. Set secrets and restart service."
