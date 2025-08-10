@@ -1,5 +1,5 @@
-## cloud-init for FutureSignalBot VM
 #cloud-config
+## cloud-init for FutureSignalBot VM
 hostname: fsbot-vm
 manage_etc_hosts: true
 
