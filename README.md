@@ -15,6 +15,95 @@ Bot Telegram sinyal MEXC Futures dengan data multi-sumber (Coinglass v4) dan ana
 - Logging berkas bergulir di `logs/bot.log` dan penanganan error yang rapi.
 - Endpoint MEXC sudah dimigrasikan ke domain `.fm` agar tidak terblokir.
 
+## Upgrade Terbaru (Agustus 2025)
+
+Fokus peningkatan presisi intraday & skalabilitas data mikro:
+
+- Perintah baru `/scalp <SIMBOL>`: ringkasan scalping cepat (bias intraday, funding, OI, long/short ratio, ATR 1m, estimasi stop & TP, Volume Profile POC/HVN/LVN bila aktif).
+- Micro Metrics Layer (1m candles) tersimpan dalam struktur deque per simbol: harga, high, low, volume, true range → menghitung ATR1m & Volume Profile ringan.
+- Persistensi micro metrics ke disk (JSON) dengan penulisan periodik & load saat start untuk mengurangi "warm-up" kosong setelah restart.
+- Background refresh loop terjadwal untuk menarik 1m klines simbol yang paling baru digunakan tanpa menunggu permintaan user (mengurangi latensi pertama).
+- Volume Profile (POC, HVN, LVN, range persentase) diintegrasikan ke:
+  - `/scalp` (scalping snapshot) — dikendalikan oleh `ENABLE_VOLUME_PROFILE_SCALP`.
+  - Penjelasan pasar `/signal` / `/timeframes` (market explanation) — dikendalikan oleh `ENABLE_VOLUME_PROFILE_EXPLANATION`.
+- Toggle konfigurasi granular untuk kinerja & keluaran (lihat bagian Konfigurasi Lanjutan).
+- Test unit dasar: validasi toggle Volume Profile (`tests/test_volume_profile_toggle.py`).
+
+### Alur Data Micro Metrics
+1. Saat memanggil `/scalp` atau analisis lain, bot memuat/menyegarkan 1m klines simbol.
+2. Data dimutakhirkan ke deques (dengan retensi menit = `MICRO_METRICS_RETENTION_MINUTES`).
+3. ATR1m dihitung dari true range deques.
+4. Volume Profile dibangun cepat dengan bucketizing range harga penutupan + volume.
+5. Snapshot scalping/penjelasan pasar dirakit, lalu (opsional) micro metrics disimpan periodik ke file JSON.
+
+### Manfaat
+- Restart cepat tidak kehilangan konteks mikro (ATR1m lebih stabil sejak awal).
+- Mengurangi burst call API ketika user pertama meminta `/scalp`.
+- Memberi lapisan kontekstual tambahan (POC relatif ke harga sekarang, sebaran volume lokal) untuk keputusan intraday.
+
+## Konfigurasi Lanjutan (Variabel Lingkungan Baru)
+
+| Variabel | Default | Deskripsi |
+|----------|---------|-----------|
+| `MICRO_METRICS_RETENTION_MINUTES` | 720 | Jumlah menit 1m data disimpan per simbol (kapasitas deque). |
+| `ATR1M_PERIOD` | 14 | Periode perhitungan ATR 1 menit (dalam bar). |
+| `VOLUME_PROFILE_BUCKETS` | 24 | Jumlah bucket histogram Volume Profile mikro. |
+| `ENABLE_VOLUME_PROFILE_SCALP` | 1 | Aktif/nonaktif POC/HVN/LVN di output `/scalp`. Set 0 untuk menonaktifkan. |
+| `ENABLE_VOLUME_PROFILE_EXPLANATION` | 1 | Aktif/nonaktif micro metrics (ATR1m/POC) dalam penjelasan pasar / analisis umum. |
+| `SCALP_MAX_MESSAGE_LEN` | 900 | Panjang maksimum pesan `/scalp` (pemotongan aman). |
+| `MICRO_METRICS_PERSIST_PATH` | `data/micro_metrics.json` | Lokasi file JSON persistensi micro metrics. Pastikan direktori writeable. |
+| `MICRO_METRICS_SAVE_INTERVAL_SEC` | 60 | Interval minimum antar penulisan file persistensi (detik). |
+| `MICRO_BACKGROUND_REFRESH_SEC` | 60 | Interval loop refresh background 1m klines. Set lebih besar untuk hemat API. |
+| `MICRO_BACKGROUND_SYMBOL_LIMIT` | 12 | Jumlah simbol teratas (berdasar akses terakhir) yang di-refresh di background. |
+
+Catatan: Set nilai dengan menambahkannya ke `.env` atau `/etc/futuresignalbot.env` lalu restart service.
+
+## Perintah Tambahan (Baru)
+
+- `/scalp <SIMBOL>` – Snapshot scalping (bias intraday, ATR1m, POC, risk sizing heuristik). Gunakan sebagai referensi cepat, bukan saran finansial.
+
+## Struktur Data Persistensi
+
+File JSON `MICRO_METRICS_PERSIST_PATH` menyimpan per simbol:
+```jsonc
+{
+  "BTCUSDT": {
+    "prices": [...],
+    "highs": [...],
+    "lows": [...],
+    "vols": [...],
+    "times": [...],
+    "trs": [...]
+  }
+}
+```
+File ditulis atomik (tulis → rename) untuk meminimalkan korupsi.
+
+## Kinerja & Tuning
+
+- Kurangi `MICRO_METRICS_RETENTION_MINUTES` jika memori terbatas.
+- Naikkan `MICRO_BACKGROUND_REFRESH_SEC` (misal 120–180) bila rate limit ketat.
+- Nonaktifkan profil mikro di analisis umum (`ENABLE_VOLUME_PROFILE_EXPLANATION=0`) bila ingin output lebih ringkas.
+- Set `ENABLE_VOLUME_PROFILE_SCALP=0` jika fokus hanya ATR1m.
+
+## Pengujian (Tests)
+
+Test unit sederhana telah ditambahkan:
+```
+pytest -k volume_profile_toggle -q
+```
+Memverifikasi bahwa ketika `ENABLE_VOLUME_PROFILE_EXPLANATION` dimatikan, teks penjelasan pasar tidak menyertakan label POC / ATR1m.
+
+## Troubleshooting Tambahan (Micro Layer)
+
+| Gejala | Penyebab Umum | Solusi |
+|--------|---------------|--------|
+| ATR1m selalu 0 | Data 1m belum cukup bar | Jalankan `/scalp` 1–2 menit atau periksa koneksi klines |
+| POC/HVN/LVN kosong | Volume Profile dinonaktifkan atau data kurang | Pastikan flag enable & set retention > 30 |
+| File persistensi tidak muncul | Direktori `data/` belum ada / permission | `mkdir -p data` & cek permission user service |
+| Output /scalp terpotong | Melebihi `SCALP_MAX_MESSAGE_LEN` | Naikkan nilai atau kurangi detail bucket |
+
+
 ## Persyaratan
 
 - Python 3.11
