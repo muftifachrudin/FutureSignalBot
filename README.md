@@ -30,6 +30,7 @@ Fokus peningkatan presisi intraday & skalabilitas data mikro:
 - Test unit dasar: validasi toggle Volume Profile (`tests/test_volume_profile_toggle.py`).
 
 ### Alur Data Micro Metrics
+
 1. Saat memanggil `/scalp` atau analisis lain, bot memuat/menyegarkan 1m klines simbol.
 2. Data dimutakhirkan ke deques (dengan retensi menit = `MICRO_METRICS_RETENTION_MINUTES`).
 3. ATR1m dihitung dari true range deques.
@@ -37,24 +38,25 @@ Fokus peningkatan presisi intraday & skalabilitas data mikro:
 5. Snapshot scalping/penjelasan pasar dirakit, lalu (opsional) micro metrics disimpan periodik ke file JSON.
 
 ### Manfaat
+
 - Restart cepat tidak kehilangan konteks mikro (ATR1m lebih stabil sejak awal).
 - Mengurangi burst call API ketika user pertama meminta `/scalp`.
 - Memberi lapisan kontekstual tambahan (POC relatif ke harga sekarang, sebaran volume lokal) untuk keputusan intraday.
 
 ## Konfigurasi Lanjutan (Variabel Lingkungan Baru)
 
-| Variabel | Default | Deskripsi |
-|----------|---------|-----------|
-| `MICRO_METRICS_RETENTION_MINUTES` | 720 | Jumlah menit 1m data disimpan per simbol (kapasitas deque). |
-| `ATR1M_PERIOD` | 14 | Periode perhitungan ATR 1 menit (dalam bar). |
-| `VOLUME_PROFILE_BUCKETS` | 24 | Jumlah bucket histogram Volume Profile mikro. |
-| `ENABLE_VOLUME_PROFILE_SCALP` | 1 | Aktif/nonaktif POC/HVN/LVN di output `/scalp`. Set 0 untuk menonaktifkan. |
-| `ENABLE_VOLUME_PROFILE_EXPLANATION` | 1 | Aktif/nonaktif micro metrics (ATR1m/POC) dalam penjelasan pasar / analisis umum. |
-| `SCALP_MAX_MESSAGE_LEN` | 900 | Panjang maksimum pesan `/scalp` (pemotongan aman). |
-| `MICRO_METRICS_PERSIST_PATH` | `data/micro_metrics.json` | Lokasi file JSON persistensi micro metrics. Pastikan direktori writeable. |
-| `MICRO_METRICS_SAVE_INTERVAL_SEC` | 60 | Interval minimum antar penulisan file persistensi (detik). |
-| `MICRO_BACKGROUND_REFRESH_SEC` | 60 | Interval loop refresh background 1m klines. Set lebih besar untuk hemat API. |
-| `MICRO_BACKGROUND_SYMBOL_LIMIT` | 12 | Jumlah simbol teratas (berdasar akses terakhir) yang di-refresh di background. |
+| Variabel                            | Default                   | Deskripsi                                                                        |
+| ----------------------------------- | ------------------------- | -------------------------------------------------------------------------------- |
+| `MICRO_METRICS_RETENTION_MINUTES`   | 720                       | Jumlah menit 1m data disimpan per simbol (kapasitas deque).                      |
+| `ATR1M_PERIOD`                      | 14                        | Periode perhitungan ATR 1 menit (dalam bar).                                     |
+| `VOLUME_PROFILE_BUCKETS`            | 24                        | Jumlah bucket histogram Volume Profile mikro.                                    |
+| `ENABLE_VOLUME_PROFILE_SCALP`       | 1                         | Aktif/nonaktif POC/HVN/LVN di output `/scalp`. Set 0 untuk menonaktifkan.        |
+| `ENABLE_VOLUME_PROFILE_EXPLANATION` | 1                         | Aktif/nonaktif micro metrics (ATR1m/POC) dalam penjelasan pasar / analisis umum. |
+| `SCALP_MAX_MESSAGE_LEN`             | 900                       | Panjang maksimum pesan `/scalp` (pemotongan aman).                               |
+| `MICRO_METRICS_PERSIST_PATH`        | `data/micro_metrics.json` | Lokasi file JSON persistensi micro metrics. Pastikan direktori writeable.        |
+| `MICRO_METRICS_SAVE_INTERVAL_SEC`   | 60                        | Interval minimum antar penulisan file persistensi (detik).                       |
+| `MICRO_BACKGROUND_REFRESH_SEC`      | 60                        | Interval loop refresh background 1m klines. Set lebih besar untuk hemat API.     |
+| `MICRO_BACKGROUND_SYMBOL_LIMIT`     | 12                        | Jumlah simbol teratas (berdasar akses terakhir) yang di-refresh di background.   |
 
 Catatan: Set nilai dengan menambahkannya ke `.env` atau `/etc/futuresignalbot.env` lalu restart service.
 
@@ -65,6 +67,7 @@ Catatan: Set nilai dengan menambahkannya ke `.env` atau `/etc/futuresignalbot.en
 ## Struktur Data Persistensi
 
 File JSON `MICRO_METRICS_PERSIST_PATH` menyimpan per simbol:
+
 ```jsonc
 {
   "BTCUSDT": {
@@ -77,6 +80,7 @@ File JSON `MICRO_METRICS_PERSIST_PATH` menyimpan per simbol:
   }
 }
 ```
+
 File ditulis atomik (tulis → rename) untuk meminimalkan korupsi.
 
 ## Kinerja & Tuning
@@ -89,20 +93,21 @@ File ditulis atomik (tulis → rename) untuk meminimalkan korupsi.
 ## Pengujian (Tests)
 
 Test unit sederhana telah ditambahkan:
+
 ```
 pytest -k volume_profile_toggle -q
 ```
+
 Memverifikasi bahwa ketika `ENABLE_VOLUME_PROFILE_EXPLANATION` dimatikan, teks penjelasan pasar tidak menyertakan label POC / ATR1m.
 
 ## Troubleshooting Tambahan (Micro Layer)
 
-| Gejala | Penyebab Umum | Solusi |
-|--------|---------------|--------|
-| ATR1m selalu 0 | Data 1m belum cukup bar | Jalankan `/scalp` 1–2 menit atau periksa koneksi klines |
-| POC/HVN/LVN kosong | Volume Profile dinonaktifkan atau data kurang | Pastikan flag enable & set retention > 30 |
-| File persistensi tidak muncul | Direktori `data/` belum ada / permission | `mkdir -p data` & cek permission user service |
-| Output /scalp terpotong | Melebihi `SCALP_MAX_MESSAGE_LEN` | Naikkan nilai atau kurangi detail bucket |
-
+| Gejala                        | Penyebab Umum                                 | Solusi                                                  |
+| ----------------------------- | --------------------------------------------- | ------------------------------------------------------- |
+| ATR1m selalu 0                | Data 1m belum cukup bar                       | Jalankan `/scalp` 1–2 menit atau periksa koneksi klines |
+| POC/HVN/LVN kosong            | Volume Profile dinonaktifkan atau data kurang | Pastikan flag enable & set retention > 30               |
+| File persistensi tidak muncul | Direktori `data/` belum ada / permission      | `mkdir -p data` & cek permission user service           |
+| Output /scalp terpotong       | Melebihi `SCALP_MAX_MESSAGE_LEN`              | Naikkan nilai atau kurangi detail bucket                |
 
 ## Persyaratan
 
