@@ -244,8 +244,11 @@ class PairsCache:
         # (For now, use funding, OI, and short-term L/S as proxy for liquidity heatmap)
         bias: str = 'WAIT'
         reason: str = ""
-        tp: Optional[float] = None
+        entry: Optional[float] = None
+        tp1: Optional[float] = None
+        tp2: Optional[float] = None
         sl: Optional[float] = None
+
         if at_res:
             # At resistance: consider short
             if funding < 0 and oi_chg < 0:
@@ -256,7 +259,11 @@ class PairsCache:
                 reason = f"Harga di resisten, tapi funding/OI tidak mendukung short."
             # TP: nearest/farthest support, SL: above resistance/volatility
             if bias == 'SHORT' and strongest_sup is not None and strongest_res is not None:
-                tp = strongest_sup
+                entry = float(p) if isinstance(p, (int, float)) and p else strongest_res
+                # Two targets: midpoint of range and opposing S/R
+                rng = max(0.0, strongest_res - strongest_sup)
+                tp1 = strongest_res - (rng * 0.5) if rng > 0 else strongest_sup
+                tp2 = strongest_sup
                 sl = strongest_res * (1 + max(0.002, atr1m/100))
         elif at_sup:
             # At support: consider long
@@ -268,7 +275,10 @@ class PairsCache:
                 reason = f"Harga di support, tapi funding/OI tidak mendukung long."
             # TP: nearest/farthest resistance, SL: below support/volatility
             if bias == 'LONG' and strongest_res is not None and strongest_sup is not None:
-                tp = strongest_res
+                entry = float(p) if isinstance(p, (int, float)) and p else strongest_sup
+                rng = max(0.0, strongest_res - strongest_sup)
+                tp1 = strongest_sup + (rng * 0.5) if rng > 0 else strongest_res
+                tp2 = strongest_res
                 sl = strongest_sup * (1 - max(0.002, atr1m/100))
         else:
             bias = 'WAIT'
@@ -276,9 +286,19 @@ class PairsCache:
 
         # --- 6. Format output ---
         lines: List[str] = []
-        lines.append(f"🎯 *Scalp {symbol}* | Sinyal: {bias}")
-        if price:
-            lines.append(f"Harga: {price}")
+        lines.append(f"⚡ *Scalping {symbol}*")
+        lines.append(f"Sinyal: {bias}")
+        if entry is not None:
+            lines.append(f"Harga Entri: {entry:.2f}")
+        elif isinstance(p, (int, float)) and p:
+            lines.append(f"Harga Entri: {p:.2f}")
+        elif price:
+            # fallback to raw price string if formatting failed
+            lines.append(f"Harga Entri: {price}")
+        if bias in ('LONG', 'SHORT') and sl is not None:
+            lines.append(f"SL: {sl:.2f}")
+        if bias in ('LONG', 'SHORT') and tp1 is not None and tp2 is not None:
+            lines.append(f"TP1: {tp1:.2f} | TP2: {tp2:.2f}")
         if strongest_res:
             lines.append(f"Resisten terkuat (1H/4H): {strongest_res:.2f}")
         if strongest_sup:
@@ -292,15 +312,13 @@ class PairsCache:
         if short_lsr is not None:
             lines.append(f"LS (5-15m): {short_lsr:.2f}")
         lines.append(f"ATR 1m({Config.ATR1M_PERIOD}): {atr1m:.2f}%")
-        # Lightly surface POC from volume profile to avoid unused variable and add context
+        # Lightly surface POC from volume profile to add context
         try:
             if vol_prof and isinstance(vol_prof.get('poc'), (int, float)):
                 lines.append(f"POC (1m VP): {float(vol_prof['poc']):.2f}")
         except Exception:
             pass
         lines.append(reason)
-        if bias in ('LONG', 'SHORT') and tp and sl:
-            lines.append(f"TP: {tp:.2f} | SL: {sl:.2f}")
         lines.append("Catatan: Sinyal hanya muncul jika harga di area support/resisten utama (1H/4H) dan didukung funding & OI. TP/SL otomatis dari level S/R & volatilitas.")
         snapshot = "\n".join(lines)
         if len(snapshot) > Config.SCALP_MAX_MESSAGE_LEN:
