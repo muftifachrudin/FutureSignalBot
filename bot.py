@@ -132,6 +132,8 @@ GeneratorClass: Type[SignalGeneratorProtocol] = _get_generator_class()
 
 
 class TradingSignalBot:
+    # Per-user state for custom pair input flow
+    awaiting_custom: Dict[int, str]
     def __init__(self) -> None:
         self.token: str = Config.TELEGRAM_BOT_TOKEN
         # Fully parameterize Application generics to avoid Unknown types from stubs
@@ -143,6 +145,8 @@ class TradingSignalBot:
         except Exception:
             path = None
         self.pairs_store: PairsStore = PairsStore(path)
+        # Track users awaiting a custom pair input; value indicates mode ('both' => signal+analysis)
+        self.awaiting_custom = {}
 
     def run(self) -> None:
         """Run the bot using Application.run_polling (blocking)."""
@@ -393,7 +397,8 @@ class TradingSignalBot:
                           " Contoh: /pairs_add ARBUSDT")
         message += admin_hint
         keyboard = [
-            [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data="get_signal_input")],
+            [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data="get_signal_input"),
+             InlineKeyboardButton("➕ Pair Kustom", callback_data="custom_pair")],
             [InlineKeyboardButton("🔄 Muat Ulang", callback_data="refresh_pairs")],
             [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
         ]
@@ -542,6 +547,9 @@ class TradingSignalBot:
         msg = update.effective_message
         if not msg or not msg.text:
             return
+        # If awaiting custom input for this user, consume this message as the symbol
+        user_id = update.effective_user.id if update.effective_user else None
+        awaiting_mode = self.awaiting_custom.pop(int(user_id), None) if user_id else None
         try:
             symbol = validate_symbol(msg.text)
         except ValueError:
@@ -550,15 +558,37 @@ class TradingSignalBot:
                 parse_mode='Markdown'
             )
             return
-        keyboard = [
-            [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data=f"signal_{symbol}")],
-            [InlineKeyboardButton("📊 Analisis Pasar", callback_data=f"analyze_{symbol}")]
-        ]
-        await msg.reply_text(
-            f"📈 **{symbol}** - Pilih aksi di bawah:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
+        if awaiting_mode == 'both':
+            try:
+                processing = await msg.reply_text(f"🔄 Memproses **{symbol}** (sinyal + analisis)...", parse_mode='Markdown')
+                assert self.signal_generator is not None
+                signal = await self.signal_generator.generate_signal(symbol)
+                analysis = await self.signal_generator.get_market_explanation(symbol)
+                if signal:
+                    message = format_signal_message(symbol, cast(Dict[str, Any], signal)) + f"\n\n{get_timeframe_display()}"
+                    sig_kb = [
+                        [InlineKeyboardButton("🔄 Muat Ulang", callback_data=f"refresh_signal_{symbol}")],
+                        [InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}")],
+                        [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
+                    ]
+                    await processing.edit_text(truncate_text(message), reply_markup=InlineKeyboardMarkup(sig_kb), parse_mode='Markdown')
+                else:
+                    await processing.edit_text(format_error_message("Gagal membuat sinyal.", symbol), parse_mode='Markdown')
+                if analysis:
+                    await msg.reply_text(truncate_text(format_market_analysis(symbol, analysis)), parse_mode='Markdown')
+            except Exception as e:
+                logger.error(f"Error in custom pair processing for {symbol}: {e}")
+                await msg.reply_text(format_error_message("Terjadi kesalahan saat memproses pair kustom.", symbol), parse_mode='Markdown')
+        else:
+            keyboard = [
+                [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data=f"signal_{symbol}")],
+                [InlineKeyboardButton("📊 Analisis Pasar", callback_data=f"analyze_{symbol}")]
+            ]
+            await msg.reply_text(
+                f"📈 **{symbol}** - Pilih aksi di bawah:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
 
     # Callback router
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG002
@@ -598,6 +628,8 @@ class TradingSignalBot:
                 await self._handle_refresh_signal(query, symbol)
             elif data == "refresh_pairs":
                 await self._handle_refresh_pairs(query)
+            elif data == "custom_pair":
+                await self._handle_custom_pair_prompt(query)
             else:
                 await query.edit_message_text("❌ Aksi tidak dikenal.")
         except Exception as e:
@@ -827,10 +859,28 @@ class TradingSignalBot:
         if pairs:
             message = format_pairs_list(pairs)
             keyboard = [
-                [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data="get_signal")],
+                [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data="get_signal"),
+                 InlineKeyboardButton("➕ Pair Kustom", callback_data="custom_pair")],
                 [InlineKeyboardButton("🔄 Muat Ulang", callback_data="refresh_pairs")],
                 [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
             ]
             await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
         else:
             await query.edit_message_text(format_error_message("Gagal memuat daftar pasangan."), parse_mode='Markdown')
+
+    async def _handle_custom_pair_prompt(self, query: CallbackQuery) -> None:
+        user_id = query.from_user.id if query.from_user else None
+        if user_id:
+            # Expect a symbol next; mode 'both' => generate signal+analysis automatically
+            self.awaiting_custom[int(user_id)] = 'both'
+        message = (
+            "\n".join([
+                "🧩 **Pair Kustom**",
+                "",
+                "Kirim simbol trading apapun (contoh: `BTCUSDT` atau cukup `BTC`).",
+                "Bot akan langsung membuat sinyal dan analisis untuk simbol tersebut.",
+            ])
+        )
+        keyboard = [[InlineKeyboardButton("🔥 Pasangan Populer", callback_data="popular_pairs")],
+                    [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]]
+        await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
