@@ -205,7 +205,7 @@ class PairsCache:
         except Exception:
             short_lsr = None
 
-        # --- 3. Find strongest S/R on 1H/4H ---
+    # --- 3. Find strongest S/R on 1H/4H ---
         strongest_res: Optional[float] = None
         strongest_sup: Optional[float] = None
         tf_highs: List[float] = []
@@ -231,14 +231,50 @@ class PairsCache:
         if tf_lows:
             strongest_sup = min(tf_lows)
 
-        # --- 4. Determine if price is at/near strongest S/R ---
-        sr_threshold: float = 0.0015  # 0.15% proximity threshold (configurable)
-        at_res: bool = False
-        at_sup: bool = False
-        if isinstance(p, (int, float)) and p and strongest_res is not None:
-            at_res = abs(p - strongest_res) / p < sr_threshold
-        if isinstance(p, (int, float)) and p and strongest_sup is not None:
-            at_sup = abs(p - strongest_sup) / p < sr_threshold
+        # --- 4. Build S/R price ranges and whether price ever touched them ---
+        # Range width based on micro ATR and a minimum pct
+        sr_base_pct: float = 0.0015  # 0.15%
+        sr_range_pct: float = max(sr_base_pct, (atr1m / 100.0) * 0.6)
+        support_range: Optional[Tuple[float, float]] = None
+        resistance_range: Optional[Tuple[float, float]] = None
+        if strongest_sup is not None and isinstance(p, (int, float)) and p:
+            half = max(1e-12, float(p) * sr_range_pct)
+            support_range = (max(0.0, strongest_sup - half), strongest_sup + half)
+        if strongest_res is not None and isinstance(p, (int, float)) and p:
+            half = max(1e-12, float(p) * sr_range_pct)
+            resistance_range = (max(0.0, strongest_res - half), strongest_res + half)
+
+        # Check if price ever touched ranges recently (using 1m micro highs/lows)
+        def _touched(rng: Optional[Tuple[float, float]]) -> bool:
+            if not rng:
+                return False
+            lo, hi = rng
+            highs = self._micro_highs.get(symbol) or deque()
+            lows = self._micro_lows.get(symbol) or deque()
+            try:
+                for h, l in zip(highs, lows):
+                    if l <= hi and h >= lo:
+                        return True
+            except Exception:
+                return False
+            return False
+
+        touched_sup = _touched(support_range)
+        touched_res = _touched(resistance_range)
+
+        # Direction: short-term using last two closes
+        last_close = None
+        prev_close = None
+        try:
+            closes = self._micro_prices.get(symbol) or deque()
+            if len(closes) >= 2:
+                last_close = float(closes[-1])
+                prev_close = float(closes[-2])
+        except Exception:
+            last_close = None
+            prev_close = None
+        direction_up = (last_close is not None and prev_close is not None and last_close > prev_close)
+        direction_down = (last_close is not None and prev_close is not None and last_close < prev_close)
 
         # --- 5. Combine with liquidity heatmap, funding, OI for entry logic ---
         # (For now, use funding, OI, and short-term L/S as proxy for liquidity heatmap)
@@ -249,40 +285,35 @@ class PairsCache:
         tp2: Optional[float] = None
         sl: Optional[float] = None
 
-        if at_res:
-            # At resistance: consider short
-            if funding < 0 and oi_chg < 0:
-                bias = 'SHORT'
-                reason = f"Harga di resisten terkuat ({strongest_res:.2f}), funding negatif, OI turun."
-            else:
-                bias = 'WAIT'
-                reason = f"Harga di resisten, tapi funding/OI tidak mendukung short."
-            # TP: nearest/farthest support, SL: above resistance/volatility
-            if bias == 'SHORT' and strongest_sup is not None and strongest_res is not None:
-                entry = float(p) if isinstance(p, (int, float)) and p else strongest_res
-                # Two targets: midpoint of range and opposing S/R
-                rng = max(0.0, strongest_res - strongest_sup)
-                tp1 = strongest_res - (rng * 0.5) if rng > 0 else strongest_sup
-                tp2 = strongest_sup
-                sl = strongest_res * (1 + max(0.002, atr1m/100))
-        elif at_sup:
-            # At support: consider long
-            if funding > 0 and oi_chg > 0:
-                bias = 'LONG'
-                reason = f"Harga di support terkuat ({strongest_sup:.2f}), funding positif, OI naik."
-            else:
-                bias = 'WAIT'
-                reason = f"Harga di support, tapi funding/OI tidak mendukung long."
-            # TP: nearest/farthest resistance, SL: below support/volatility
-            if bias == 'LONG' and strongest_res is not None and strongest_sup is not None:
-                entry = float(p) if isinstance(p, (int, float)) and p else strongest_sup
-                rng = max(0.0, strongest_res - strongest_sup)
-                tp1 = strongest_sup + (rng * 0.5) if rng > 0 else strongest_res
-                tp2 = strongest_res
-                sl = strongest_sup * (1 - max(0.002, atr1m/100))
+        # Range-touch logic:
+        # - If price has touched resistance range and now moving down -> SHORT
+        # - If price has touched support range and now moving up -> LONG
+        # - Else WAIT
+        if touched_res and direction_down and strongest_res is not None and strongest_sup is not None:
+            bias = 'SHORT'
+            reason = "Harga menyentuh area resisten dan berbalik turun."
+            entry = float(p) if isinstance(p, (int, float)) and p else strongest_res
+            rng = max(0.0, strongest_res - strongest_sup)
+            tp1 = strongest_res - (rng * 0.5) if rng > 0 else strongest_sup
+            tp2 = strongest_sup
+            # SL di atas batas atas range resisten + buffer ATR
+            hi = resistance_range[1] if resistance_range else strongest_res
+            sl = hi * (1 + max(0.002, atr1m / 100))
+        elif touched_sup and direction_up and strongest_res is not None and strongest_sup is not None:
+            bias = 'LONG'
+            reason = "Harga menyentuh area support dan berbalik naik."
+            entry = float(p) if isinstance(p, (int, float)) and p else strongest_sup
+            rng = max(0.0, strongest_res - strongest_sup)
+            tp1 = strongest_sup + (rng * 0.5) if rng > 0 else strongest_res
+            tp2 = strongest_res
+            lo = support_range[0] if support_range else strongest_sup
+            sl = lo * (1 - max(0.002, atr1m / 100))
         else:
             bias = 'WAIT'
-            reason = "Harga tidak berada di area support/resisten utama."
+            if not (touched_sup or touched_res):
+                reason = "Harga belum pernah menyentuh area support/resisten terbaru."
+            else:
+                reason = "Menunggu konfirmasi arah setelah menyentuh area."
 
         # --- 6. Format output ---
         lines: List[str] = []
@@ -299,10 +330,10 @@ class PairsCache:
             lines.append(f"SL: {sl:.2f}")
         if bias in ('LONG', 'SHORT') and tp1 is not None and tp2 is not None:
             lines.append(f"TP1: {tp1:.2f} | TP2: {tp2:.2f}")
-        if strongest_res:
-            lines.append(f"Resisten terkuat (1H/4H): {strongest_res:.2f}")
-        if strongest_sup:
-            lines.append(f"Support terkuat (1H/4H): {strongest_sup:.2f}")
+        if resistance_range and strongest_res is not None:
+            lines.append(f"Area Resisten (1H/4H): [{resistance_range[0]:.2f} - {resistance_range[1]:.2f}] (pusat {strongest_res:.2f})")
+        if support_range and strongest_sup is not None:
+            lines.append(f"Area Support (1H/4H): [{support_range[0]:.2f} - {support_range[1]:.2f}] (pusat {strongest_sup:.2f})")
         lines.append(f"Funding: {funding:.4f} | OI 24j: {oi_chg:+.2f}%")
         if lsr is not None:
             try:
@@ -319,7 +350,7 @@ class PairsCache:
         except Exception:
             pass
         lines.append(reason)
-        lines.append("Catatan: Sinyal hanya muncul jika harga di area support/resisten utama (1H/4H) dan didukung funding & OI. TP/SL otomatis dari level S/R & volatilitas.")
+        lines.append("Catatan: Sinyal muncul jika harga memasuki area S/R dan berbalik arah. TP/SL berasal dari area S/R & volatilitas. Funding/OI ditampilkan sebagai konteks.")
         snapshot = "\n".join(lines)
         if len(snapshot) > Config.SCALP_MAX_MESSAGE_LEN:
             snapshot = snapshot[: Config.SCALP_MAX_MESSAGE_LEN]

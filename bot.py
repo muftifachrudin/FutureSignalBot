@@ -237,19 +237,21 @@ class TradingSignalBot:
         msg = update.effective_message
         if not msg:
             return
-        # Concise welcome like image 3
+        # Clear welcome and primary actions
         welcome_message = (
             "\n".join([
-                "🤖 **Selamat datang di Bot Sinyal Perdagangan MEXC Futures!**",
+                "🤖 **Selamat datang di Bot Sinyal MEXC Futures**",
                 "",
-                "Pilih menu di bawah untuk memulai:",
+                "Pilih aksi utama atau jelajahi pasangan populer.",
             ])
         )
         keyboard = [
-            [InlineKeyboardButton("📊 Pasangan Populer", callback_data="popular_pairs")],
-            [InlineKeyboardButton("📈 Dapatkan Sinyal", callback_data="get_signal"),
-             InlineKeyboardButton("🔍 Analisis Pasar", callback_data="market_analysis")],
-            [InlineKeyboardButton("ℹ️ Bantuan", callback_data="help")]
+            [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data="get_signal_input"),
+             InlineKeyboardButton("📊 Analisis Pasar", callback_data="market_analysis")],
+            [InlineKeyboardButton("⚡ Scalping", callback_data="scalp_input"),
+             InlineKeyboardButton("� Pasangan Populer", callback_data="popular_pairs")],
+            [InlineKeyboardButton("➕ Pair Kustom", callback_data="custom_pair"),
+             InlineKeyboardButton("ℹ️ Bantuan", callback_data="help")]
         ]
         await msg.reply_text(welcome_message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
@@ -479,7 +481,7 @@ class TradingSignalBot:
             message = format_signal_message(symbol, cast(Dict[str, Any], signal)) + f"\n\n{get_timeframe_display()}"
             keyboard = [
                 [InlineKeyboardButton("🔄 Muat Ulang", callback_data=f"refresh_signal_{symbol}")],
-                [InlineKeyboardButton("📊 Analisis Pasar", callback_data=f"analyze_{symbol}")],
+                [InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}"), InlineKeyboardButton("⚡ Scalping", callback_data=f"scalp_{symbol}")],
                 [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
             ]
             parts = split_message(message)
@@ -515,7 +517,8 @@ class TradingSignalBot:
                 snapshot = None
             if snapshot:
                 keyboard = [
-                    [InlineKeyboardButton("🔄 Refresh", callback_data=f"signal_{symbol}"),
+                    [InlineKeyboardButton("🔄 Muat Ulang", callback_data=f"refresh_scalp_{symbol}"),
+                     InlineKeyboardButton("🎯 Sinyal", callback_data=f"signal_{symbol}"),
                      InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}")],
                     [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
                 ]
@@ -558,7 +561,7 @@ class TradingSignalBot:
             message = format_market_analysis(symbol, analysis)
             keyboard = [
                 [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data=f"signal_{symbol}")],
-                [InlineKeyboardButton("🔄 Muat Ulang Analisis", callback_data=f"analyze_{symbol}")],
+                [InlineKeyboardButton("⚡ Scalping", callback_data=f"scalp_{symbol}"), InlineKeyboardButton("🔄 Muat Ulang", callback_data=f"analyze_{symbol}")],
                 [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
             ]
             parts = split_message(message)
@@ -583,31 +586,57 @@ class TradingSignalBot:
                 parse_mode='Markdown'
             )
             return
-        if awaiting_mode == 'both':
+        if awaiting_mode in ('both','signal','analyze','scalp'):
             try:
-                processing = await msg.reply_text(f"🔄 Memproses **{symbol}** (sinyal + analisis)...", parse_mode='Markdown')
+                processing = await msg.reply_text(
+                    f"🔄 Memproses **{symbol}** ({'sinyal + analisis' if awaiting_mode=='both' else awaiting_mode})...",
+                    parse_mode='Markdown'
+                )
                 assert self.signal_generator is not None
                 try:
-                    await self.usage_store.increment(symbol, by=2)
+                    inc = 2 if awaiting_mode == 'both' else 1
+                    await self.usage_store.increment(symbol, by=inc)
                 except Exception:
                     pass
-                signal = await self.signal_generator.generate_signal(symbol)
-                analysis = await self.signal_generator.get_market_explanation(symbol)
-                if signal:
-                    message = format_signal_message(symbol, cast(Dict[str, Any], signal)) + f"\n\n{get_timeframe_display()}"
+                # Execute based on mode
+                signal_res = None
+                analysis_res = None
+                if awaiting_mode in ('signal','both'):
+                    signal_res = await self.signal_generator.generate_signal(symbol)
+                if awaiting_mode in ('analyze','both'):
+                    analysis_res = await self.signal_generator.get_market_explanation(symbol)
+                if awaiting_mode == 'scalp':
+                    gen = self.signal_generator
+                    snapshot = None
+                    try:
+                        if hasattr(gen, 'get_scalp_snapshot'):
+                            snapshot = await cast(Any, gen).get_scalp_snapshot(symbol)
+                    except Exception:
+                        snapshot = None
+                    if snapshot:
+                        kb = [
+                            [InlineKeyboardButton("🔄 Muat Ulang", callback_data=f"refresh_scalp_{symbol}"), InlineKeyboardButton("🎯 Sinyal", callback_data=f"signal_{symbol}"), InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}")],
+                            [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
+                        ]
+                        await processing.edit_text(truncate_text(snapshot), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+                    else:
+                        await processing.edit_text(format_error_message("Gagal membuat snapshot scalping.", symbol), parse_mode='Markdown')
+                    return
+                if signal_res:
+                    message = format_signal_message(symbol, cast(Dict[str, Any], signal_res)) + f"\n\n{get_timeframe_display()}"
                     sig_kb = [
                         [InlineKeyboardButton("🔄 Muat Ulang", callback_data=f"refresh_signal_{symbol}")],
-                        [InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}")],
+                        [InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}"), InlineKeyboardButton("⚡ Scalping", callback_data=f"scalp_{symbol}")],
                         [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
                     ]
                     parts = split_message(message)
                     await processing.edit_text(parts[0], reply_markup=InlineKeyboardMarkup(sig_kb), parse_mode='Markdown')
                     for extra in parts[1:]:
                         await msg.reply_text(extra, parse_mode='Markdown')
-                else:
+                elif awaiting_mode in ('signal','both'):
                     await processing.edit_text(format_error_message("Gagal membuat sinyal.", symbol), parse_mode='Markdown')
-                if analysis:
-                    atext = format_market_analysis(symbol, analysis)
+                if analysis_res:
+                    atext = format_market_analysis(symbol, analysis_res)
                     for chunk in split_message(atext):
                         await msg.reply_text(chunk, parse_mode='Markdown')
             except Exception as e:
@@ -615,8 +644,7 @@ class TradingSignalBot:
                 await msg.reply_text(format_error_message("Terjadi kesalahan saat memproses pair kustom.", symbol), parse_mode='Markdown')
         else:
             keyboard = [
-                [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data=f"signal_{symbol}")],
-                [InlineKeyboardButton("📊 Analisis Pasar", callback_data=f"analyze_{symbol}")]
+                [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data=f"signal_{symbol}"), InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}"), InlineKeyboardButton("⚡ Scalping", callback_data=f"scalp_{symbol}")]
             ]
             await msg.reply_text(
                 f"📈 **{symbol}** - Pilih aksi di bawah:",
@@ -640,6 +668,8 @@ class TradingSignalBot:
                 await self._handle_get_signal_prompt(query)
             elif data == "market_analysis":
                 await self._handle_market_analysis_prompt(query)
+            elif data == "scalp_input":
+                await self._handle_scalp_prompt(query)
             elif data.startswith("tf_") and data.count("_") == 1:
                 timeframe = data.split("_", 1)[1]
                 await self._handle_timeframe_select(query, timeframe)
@@ -657,13 +687,25 @@ class TradingSignalBot:
             elif data.startswith("analyze_"):
                 symbol = data.split("_", 1)[1]
                 await self._handle_analyze_callback(query, symbol)
+            elif data.startswith("scalp_") and data != "scalp_input":
+                symbol = data.split("_", 1)[1]
+                await self._handle_scalp_callback(query, symbol)
             elif data.startswith("refresh_signal_"):
                 symbol = data.split("_", 2)[2]
                 await self._handle_refresh_signal(query, symbol)
+            elif data.startswith("refresh_scalp_"):
+                symbol = data.split("_", 2)[2]
+                await self._handle_refresh_scalp(query, symbol)
             elif data == "refresh_pairs":
                 await self._handle_refresh_pairs(query)
             elif data == "custom_pair":
-                await self._handle_custom_pair_prompt(query)
+                await self._handle_custom_pair_mode_select(query)
+            elif data in ("custom_pair_signal", "custom_pair_analyze", "custom_pair_scalp", "custom_pair_both"):
+                mode = data.replace("custom_pair_", "")
+                await self._handle_custom_pair_prompt(query, mode)
+            elif data.startswith("pair_"):
+                symbol = data.split("_", 1)[1]
+                await self._handle_pair_action(query, symbol)
             else:
                 await query.edit_message_text("❌ Aksi tidak dikenal.")
         except Exception as e:
@@ -674,16 +716,18 @@ class TradingSignalBot:
     async def _render_main_menu(self, query: CallbackQuery) -> None:
         welcome_message = (
             "\n".join([
-                "🤖 **Selamat datang di Bot Sinyal Perdagangan MEXC Futures!**",
+                "🤖 **Selamat datang di Bot Sinyal MEXC Futures**",
                 "",
-                "Pilih menu di bawah untuk memulai:",
+                "Pilih aksi utama atau jelajahi pasangan populer.",
             ])
         )
         keyboard = [
-            [InlineKeyboardButton("📊 Pasangan Populer", callback_data="popular_pairs")],
-            [InlineKeyboardButton("📈 Dapatkan Sinyal", callback_data="get_signal"),
-             InlineKeyboardButton("🔍 Analisis Pasar", callback_data="market_analysis")],
-            [InlineKeyboardButton("ℹ️ Bantuan", callback_data="help")]
+            [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data="get_signal_input"),
+             InlineKeyboardButton("📊 Analisis Pasar", callback_data="market_analysis")],
+            [InlineKeyboardButton("⚡ Scalping", callback_data="scalp_input"),
+             InlineKeyboardButton("🔥 Pasangan Populer", callback_data="popular_pairs")],
+            [InlineKeyboardButton("➕ Pair Kustom", callback_data="custom_pair"),
+             InlineKeyboardButton("ℹ️ Bantuan", callback_data="help")]
         ]
         await query.edit_message_text(welcome_message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
@@ -701,7 +745,7 @@ class TradingSignalBot:
         # Fallback to a small static list if no usage yet
         if not top:
             top = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "ADAUSDT", "XRPUSDT", "DOGEUSDT", "ARBUSDT"]
-        message = "🔥 **Pasangan Populer**\n\nPilih pasangan untuk mendapatkan sinyal:\n\n"
+        message = "🔥 **Pasangan Populer**\n\nPilih pasangan untuk tindakan lebih lanjut:\n\n"
         keyboard: List[List[InlineKeyboardButton]] = []
         # Render in 2-column rows
         for i in range(0, len(top), 2):
@@ -709,7 +753,7 @@ class TradingSignalBot:
             for j in range(2):
                 if i + j < len(top):
                     pair = top[i + j]
-                    row.append(InlineKeyboardButton(pair, callback_data=f"signal_{pair}"))
+                    row.append(InlineKeyboardButton(pair, callback_data=f"pair_{pair}"))
             keyboard.append(row)
         keyboard.append([InlineKeyboardButton("📋 Semua Pasangan", callback_data="refresh_pairs")])
         keyboard.append([InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")])
@@ -730,7 +774,11 @@ class TradingSignalBot:
                 "Atau gunakan: `/signal SYMBOL`",
             ])
         )
-        keyboard = [[InlineKeyboardButton("🔥 Pasangan Populer", callback_data="popular_pairs")]]
+        keyboard = [
+            [InlineKeyboardButton("🔥 Pasangan Populer", callback_data="popular_pairs")],
+            [InlineKeyboardButton("➕ Pair Kustom (Sinyal)", callback_data="custom_pair_signal")],
+            [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
+        ]
         await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     async def _handle_timeframe_select(self, query: CallbackQuery, timeframe: str) -> None:
@@ -823,7 +871,11 @@ class TradingSignalBot:
                 "Atau gunakan: `/analyze SYMBOL`",
             ])
         )
-        keyboard = [[InlineKeyboardButton("🔥 Pasangan Populer", callback_data="popular_pairs")]]
+        keyboard = [
+            [InlineKeyboardButton("🔥 Pasangan Populer", callback_data="popular_pairs")],
+            [InlineKeyboardButton("➕ Pair Kustom (Analisis)", callback_data="custom_pair_analyze")],
+            [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
+        ]
         await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     async def _handle_help_callback(self, query: CallbackQuery) -> None:
@@ -851,8 +903,9 @@ class TradingSignalBot:
             ])
         )
         keyboard = [
-            [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data="get_signal")],
+            [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data="get_signal_input")],
             [InlineKeyboardButton("📊 Analisis", callback_data="market_analysis")],
+            [InlineKeyboardButton("⚡ Scalping", callback_data="scalp_input")],
             [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
         ]
         await query.edit_message_text(help_message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -908,7 +961,7 @@ class TradingSignalBot:
             message = format_market_analysis(symbol, analysis)
             keyboard = [
                 [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data=f"signal_{symbol}")],
-                [InlineKeyboardButton("🔄 Muat Ulang", callback_data=f"analyze_{symbol}")],
+                [InlineKeyboardButton("⚡ Scalping", callback_data=f"scalp_{symbol}"), InlineKeyboardButton("🔄 Muat Ulang", callback_data=f"analyze_{symbol}")],
                 [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
             ]
             parts = split_message(message)
@@ -939,7 +992,7 @@ class TradingSignalBot:
             message = format_signal_message(symbol, cast(Dict[str, Any], signal)) + f"\n\n{get_timeframe_display()}"
             keyboard = [
                 [InlineKeyboardButton("🔄 Muat Ulang", callback_data=f"refresh_signal_{symbol}")],
-                [InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}")],
+                [InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}"), InlineKeyboardButton("⚡ Scalping", callback_data=f"scalp_{symbol}")],
                 [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
             ]
             parts = split_message(message)
@@ -966,28 +1019,97 @@ class TradingSignalBot:
         if pairs:
             message = format_pairs_list(pairs)
             keyboard = [
-                [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data="get_signal"),
-                 InlineKeyboardButton("➕ Pair Kustom", callback_data="custom_pair")],
-                [InlineKeyboardButton("🔄 Muat Ulang", callback_data="refresh_pairs")],
+                [InlineKeyboardButton("🎯 Dapatkan Sinyal", callback_data="get_signal_input"), InlineKeyboardButton("📊 Analisis", callback_data="market_analysis")],
+                [InlineKeyboardButton("➕ Pair Kustom", callback_data="custom_pair"), InlineKeyboardButton("🔄 Muat Ulang", callback_data="refresh_pairs")],
                 [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
             ]
             await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
         else:
             await query.edit_message_text(format_error_message("Gagal memuat daftar pasangan."), parse_mode='Markdown')
 
-    async def _handle_custom_pair_prompt(self, query: CallbackQuery) -> None:
-        user_id = query.from_user.id if query.from_user else None
-        if user_id:
-            # Expect a symbol next; mode 'both' => generate signal+analysis automatically
-            self.awaiting_custom[int(user_id)] = 'both'
+    async def _handle_custom_pair_mode_select(self, query: CallbackQuery) -> None:
         message = (
             "\n".join([
                 "🧩 **Pair Kustom**",
                 "",
-                "Kirim simbol trading apapun (contoh: `BTCUSDT` atau cukup `BTC`).",
-                "Bot akan langsung membuat sinyal dan analisis untuk simbol tersebut.",
+                "Pilih tindakan, lalu kirim simbol (mis. `BTCUSDT` atau `BTC`).",
             ])
         )
-        keyboard = [[InlineKeyboardButton("🔥 Pasangan Populer", callback_data="popular_pairs")],
-                    [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]]
+        keyboard = [
+            [InlineKeyboardButton("🎯 Sinyal", callback_data="custom_pair_signal"), InlineKeyboardButton("📊 Analisis", callback_data="custom_pair_analyze")],
+            [InlineKeyboardButton("⚡ Scalping", callback_data="custom_pair_scalp"), InlineKeyboardButton("🎯+📊 Keduanya", callback_data="custom_pair_both")],
+            [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
+        ]
         await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    async def _handle_custom_pair_prompt(self, query: CallbackQuery, mode: str) -> None:
+        user_id = query.from_user.id if query.from_user else None
+        if user_id:
+            self.awaiting_custom[int(user_id)] = mode
+        label = {
+            'signal': 'Sinyal',
+            'analyze': 'Analisis',
+            'scalp': 'Scalping',
+            'both': 'Sinyal + Analisis'
+        }.get(mode, 'Sinyal')
+        message = (
+            "\n".join([
+                f"🧩 **Pair Kustom ({label})**",
+                "",
+                "Kirim simbol trading sekarang (contoh: `BTCUSDT` atau cukup `BTC`).",
+            ])
+        )
+        keyboard = [[InlineKeyboardButton("🔥 Pasangan Populer", callback_data="popular_pairs")], [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]]
+        await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    async def _handle_pair_action(self, query: CallbackQuery, symbol: str) -> None:
+        message = ("\n".join([f"📌 **{symbol}**", "Pilih tindakan:"]))
+        keyboard = [
+            [InlineKeyboardButton("🎯 Sinyal", callback_data=f"signal_{symbol}"), InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}"), InlineKeyboardButton("⚡ Scalping", callback_data=f"scalp_{symbol}")],
+            [InlineKeyboardButton("⬅️ Kembali", callback_data="popular_pairs"), InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
+        ]
+        await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    async def _handle_scalp_prompt(self, query: CallbackQuery) -> None:
+        message = (
+            "\n".join([
+                "⚡ **Scalping**",
+                "",
+                "Kirim simbol untuk snapshot scalping:",
+                "",
+                "**Contoh:**",
+                "• `BTCUSDT` atau `BTC`",
+                "• `ETHUSDT` atau `ETH`",
+                "",
+                "Atau gunakan: `/scalp SYMBOL`",
+            ])
+        )
+        keyboard = [[InlineKeyboardButton("🔥 Pasangan Populer", callback_data="popular_pairs")], [InlineKeyboardButton("➕ Pair Kustom (Scalping)", callback_data="custom_pair_scalp")], [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]]
+        await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    async def _handle_scalp_callback(self, query: CallbackQuery, symbol: str) -> None:
+        await query.edit_message_text(f"⚡ **Scalping {symbol}...**\n\nMengumpulkan snapshot...", parse_mode='Markdown')
+        assert self.signal_generator is not None
+        try:
+            await self.usage_store.increment(symbol)
+        except Exception:
+            pass
+        snapshot = None
+        try:
+            gen = self.signal_generator
+            if hasattr(gen, 'get_scalp_snapshot'):
+                snapshot = await cast(Any, gen).get_scalp_snapshot(symbol)
+        except Exception as e:
+            logger.error(f"Error scalp callback {symbol}: {e}")
+            snapshot = None
+        if snapshot:
+            keyboard = [
+                [InlineKeyboardButton("🔄 Muat Ulang", callback_data=f"refresh_scalp_{symbol}"), InlineKeyboardButton("🎯 Sinyal", callback_data=f"signal_{symbol}"), InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}")],
+                [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
+            ]
+            await query.edit_message_text(truncate_text(snapshot), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        else:
+            await query.edit_message_text(format_error_message("Gagal membuat snapshot scalping.", symbol), parse_mode='Markdown')
+
+    async def _handle_refresh_scalp(self, query: CallbackQuery, symbol: str) -> None:
+        await self._handle_scalp_callback(query, symbol)
