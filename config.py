@@ -108,6 +108,8 @@ class Config:
 
     # Custom path for pairs watchlist file (optional)
     PAIRS_WATCHLIST_PATH = os.getenv("PAIRS_WATCHLIST_PATH", "")
+    # Optional override path for pairs usage store (popular pairs)
+    PAIRS_USAGE_PATH = os.getenv("PAIRS_USAGE_PATH", "")
     
     # Micro metrics / scalping settings
     MICRO_METRICS_RETENTION_MINUTES = int(os.getenv("MICRO_METRICS_RETENTION_MINUTES", "720"))  # 12h default

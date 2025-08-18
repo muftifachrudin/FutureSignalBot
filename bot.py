@@ -26,9 +26,11 @@ from utils import (
     format_signal_message,
     get_timeframe_display,
     truncate_text,
+    split_message,
     validate_symbol,
 )
 from pairs_store import PairsStore
+from pairs_usage_store import PairsUsageStore
 
 # Initialize module-level logger
 logging.basicConfig(level=logging.INFO)
@@ -147,6 +149,12 @@ class TradingSignalBot:
         self.pairs_store: PairsStore = PairsStore(path)
         # Track users awaiting a custom pair input; value indicates mode ('both' => signal+analysis)
         self.awaiting_custom = {}
+        # Popular pairs usage tracking
+        try:
+            usage_path = getattr(Config, 'PAIRS_USAGE_PATH', '') or None
+        except Exception:
+            usage_path = None
+        self.usage_store: PairsUsageStore = PairsUsageStore(usage_path)
 
     def run(self) -> None:
         """Run the bot using Application.run_polling (blocking)."""
@@ -461,6 +469,11 @@ class TradingSignalBot:
             parse_mode='Markdown'
         )
         assert self.signal_generator is not None
+        # Track usage
+        try:
+            await self.usage_store.increment(symbol)
+        except Exception:
+            pass
         signal = await self.signal_generator.generate_signal(symbol)
         if signal:
             message = format_signal_message(symbol, cast(Dict[str, Any], signal)) + f"\n\n{get_timeframe_display()}"
@@ -469,7 +482,11 @@ class TradingSignalBot:
                 [InlineKeyboardButton("📊 Analisis Pasar", callback_data=f"analyze_{symbol}")],
                 [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
             ]
-            await processing_msg.edit_text(truncate_text(message), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            parts = split_message(message)
+            # Replace the first message, then send follow-ups if any
+            await processing_msg.edit_text(parts[0], reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            for extra in parts[1:]:
+                await msg.reply_text(extra, parse_mode='Markdown')
         else:
             await processing_msg.edit_text(format_error_message("Gagal membuat sinyal.", symbol), parse_mode='Markdown')
 
@@ -531,6 +548,11 @@ class TradingSignalBot:
             parse_mode='Markdown'
         )
         assert self.signal_generator is not None
+        # Track usage
+        try:
+            await self.usage_store.increment(symbol)
+        except Exception:
+            pass
         analysis = await self.signal_generator.get_market_explanation(symbol)
         if analysis:
             message = format_market_analysis(symbol, analysis)
@@ -539,7 +561,10 @@ class TradingSignalBot:
                 [InlineKeyboardButton("🔄 Muat Ulang Analisis", callback_data=f"analyze_{symbol}")],
                 [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
             ]
-            await processing_msg.edit_text(truncate_text(message), reply_markup=InlineKeyboardMarkup(keyboard))
+            parts = split_message(message)
+            await processing_msg.edit_text(parts[0], reply_markup=InlineKeyboardMarkup(keyboard))
+            for extra in parts[1:]:
+                await msg.reply_text(extra)
         else:
             await processing_msg.edit_text(format_error_message("Gagal menganalisis kondisi pasar.", symbol), parse_mode='Markdown')
 
@@ -562,6 +587,10 @@ class TradingSignalBot:
             try:
                 processing = await msg.reply_text(f"🔄 Memproses **{symbol}** (sinyal + analisis)...", parse_mode='Markdown')
                 assert self.signal_generator is not None
+                try:
+                    await self.usage_store.increment(symbol, by=2)
+                except Exception:
+                    pass
                 signal = await self.signal_generator.generate_signal(symbol)
                 analysis = await self.signal_generator.get_market_explanation(symbol)
                 if signal:
@@ -571,11 +600,16 @@ class TradingSignalBot:
                         [InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}")],
                         [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
                     ]
-                    await processing.edit_text(truncate_text(message), reply_markup=InlineKeyboardMarkup(sig_kb), parse_mode='Markdown')
+                    parts = split_message(message)
+                    await processing.edit_text(parts[0], reply_markup=InlineKeyboardMarkup(sig_kb), parse_mode='Markdown')
+                    for extra in parts[1:]:
+                        await msg.reply_text(extra, parse_mode='Markdown')
                 else:
                     await processing.edit_text(format_error_message("Gagal membuat sinyal.", symbol), parse_mode='Markdown')
                 if analysis:
-                    await msg.reply_text(truncate_text(format_market_analysis(symbol, analysis)), parse_mode='Markdown')
+                    atext = format_market_analysis(symbol, analysis)
+                    for chunk in split_message(atext):
+                        await msg.reply_text(chunk, parse_mode='Markdown')
             except Exception as e:
                 logger.error(f"Error in custom pair processing for {symbol}: {e}")
                 await msg.reply_text(format_error_message("Terjadi kesalahan saat memproses pair kustom.", symbol), parse_mode='Markdown')
@@ -654,17 +688,31 @@ class TradingSignalBot:
         await query.edit_message_text(welcome_message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     async def _handle_popular_pairs(self, query: CallbackQuery) -> None:
-        popular_pairs = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT", "DOTUSDT"]
+        # Build dynamic top-N by usage, intersect with supported symbols for safety
+        try:
+            assert self.signal_generator is not None
+            supported = await self.signal_generator.get_supported_pairs()
+        except Exception:
+            supported = []
+        try:
+            top = await self.usage_store.get_top_n(8, allowed=supported or None)
+        except Exception:
+            top = []
+        # Fallback to a small static list if no usage yet
+        if not top:
+            top = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "ADAUSDT", "XRPUSDT", "DOGEUSDT", "ARBUSDT"]
         message = "🔥 **Pasangan Populer**\n\nPilih pasangan untuk mendapatkan sinyal:\n\n"
         keyboard: List[List[InlineKeyboardButton]] = []
-        for i in range(0, len(popular_pairs), 2):
+        # Render in 2-column rows
+        for i in range(0, len(top), 2):
             row: List[InlineKeyboardButton] = []
             for j in range(2):
-                if i + j < len(popular_pairs):
-                    pair = popular_pairs[i + j]
+                if i + j < len(top):
+                    pair = top[i + j]
                     row.append(InlineKeyboardButton(pair, callback_data=f"signal_{pair}"))
             keyboard.append(row)
         keyboard.append([InlineKeyboardButton("📋 Semua Pasangan", callback_data="refresh_pairs")])
+        keyboard.append([InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")])
         await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     async def _handle_get_signal_prompt(self, query: CallbackQuery) -> None:
@@ -693,10 +741,21 @@ class TradingSignalBot:
                 "Pilih pasangan untuk dianalisis pada timeframe ini, atau kirim simbol manual (mis. `BTCUSDT`).",
             ])
         )
-        popular_pairs = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "ADAUSDT", "XRPUSDT"]
+        # Use dynamic top-N for timeframe selection too (smaller set)
         keyboard: List[List[InlineKeyboardButton]] = []
+        try:
+            assert self.signal_generator is not None
+            supported = await self.signal_generator.get_supported_pairs()
+        except Exception:
+            supported = []
+        try:
+            top = await self.usage_store.get_top_n(6, allowed=supported or None)
+        except Exception:
+            top = []
+        if not top:
+            top = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "ADAUSDT", "XRPUSDT"]
         row: List[InlineKeyboardButton] = []
-        for i, p in enumerate(popular_pairs, start=1):
+        for i, p in enumerate(top, start=1):
             row.append(InlineKeyboardButton(p, callback_data=f"tf_analyze_{timeframe}_{p}"))
             if i % 3 == 0:
                 keyboard.append(row)
@@ -804,6 +863,10 @@ class TradingSignalBot:
             parse_mode='Markdown'
         )
         assert self.signal_generator is not None
+        try:
+            await self.usage_store.increment(symbol)
+        except Exception:
+            pass
         signal = await self.signal_generator.generate_signal(symbol)
         if signal:
             message = format_signal_message(symbol, cast(Dict[str, Any], signal)) + f"\n\n{get_timeframe_display()}"
@@ -812,7 +875,21 @@ class TradingSignalBot:
                 [InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}")],
                 [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
             ]
-            await query.edit_message_text(truncate_text(message), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            parts = split_message(message)
+            await query.edit_message_text(parts[0], reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            # Send any remaining chunks as new messages (guard None)
+            if self.application:
+                chat_id: Optional[int] = None
+                try:
+                    if getattr(query, 'from_user', None):
+                        chat_id = query.from_user.id  # type: ignore[assignment]
+                    elif getattr(query, 'message', None) and getattr(query.message, 'chat', None):
+                        chat_id = query.message.chat.id  # type: ignore[assignment]
+                except Exception:
+                    chat_id = None
+                if chat_id is not None:
+                    for extra in parts[1:]:
+                        await self.application.bot.send_message(chat_id=chat_id, text=extra, parse_mode='Markdown')
         else:
             await query.edit_message_text(format_error_message("Gagal membuat sinyal.", symbol), parse_mode='Markdown')
 
@@ -822,6 +899,10 @@ class TradingSignalBot:
             parse_mode='Markdown'
         )
         assert self.signal_generator is not None
+        try:
+            await self.usage_store.increment(symbol)
+        except Exception:
+            pass
         analysis = await self.signal_generator.get_market_explanation(symbol)
         if analysis:
             message = format_market_analysis(symbol, analysis)
@@ -830,7 +911,20 @@ class TradingSignalBot:
                 [InlineKeyboardButton("🔄 Muat Ulang", callback_data=f"analyze_{symbol}")],
                 [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
             ]
-            await query.edit_message_text(truncate_text(message), reply_markup=InlineKeyboardMarkup(keyboard))
+            parts = split_message(message)
+            await query.edit_message_text(parts[0], reply_markup=InlineKeyboardMarkup(keyboard))
+            if self.application:
+                chat_id: Optional[int] = None
+                try:
+                    if getattr(query, 'from_user', None):
+                        chat_id = query.from_user.id  # type: ignore[assignment]
+                    elif getattr(query, 'message', None) and getattr(query.message, 'chat', None):
+                        chat_id = query.message.chat.id  # type: ignore[assignment]
+                except Exception:
+                    chat_id = None
+                if chat_id is not None:
+                    for extra in parts[1:]:
+                        await self.application.bot.send_message(chat_id=chat_id, text=extra)
         else:
             await query.edit_message_text(format_error_message("Gagal menganalisis pasar.", symbol), parse_mode='Markdown')
 
@@ -848,7 +942,20 @@ class TradingSignalBot:
                 [InlineKeyboardButton("📊 Analisis", callback_data=f"analyze_{symbol}")],
                 [InlineKeyboardButton("🏠 Menu Utama", callback_data="main_menu")]
             ]
-            await query.edit_message_text(truncate_text(message), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            parts = split_message(message)
+            await query.edit_message_text(parts[0], reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            if self.application:
+                chat_id: Optional[int] = None
+                try:
+                    if getattr(query, 'from_user', None):
+                        chat_id = query.from_user.id  # type: ignore[assignment]
+                    elif getattr(query, 'message', None) and getattr(query.message, 'chat', None):
+                        chat_id = query.message.chat.id  # type: ignore[assignment]
+                except Exception:
+                    chat_id = None
+                if chat_id is not None:
+                    for extra in parts[1:]:
+                        await self.application.bot.send_message(chat_id=chat_id, text=extra, parse_mode='Markdown')
         else:
             await query.edit_message_text(format_error_message("Failed to refresh signal.", symbol), parse_mode='Markdown')
 

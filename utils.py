@@ -276,6 +276,36 @@ def truncate_text(text: str, max_length: int = 4000) -> str:
     
     return text[:max_length - 3] + "..."
 
+def split_message(text: str, max_length: int = 3500) -> List[str]:
+    """Split a long message into chunks under max_length trying to break on paragraph or line boundaries.
+    This helps avoid Telegram truncation and preserves readability.
+    """
+    try:
+        if len(text) <= max_length:
+            return [text]
+        chunks: List[str] = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= max_length:
+                chunks.append(remaining)
+                break
+            # Try splitting at paragraph boundary
+            cut = remaining.rfind("\n\n", 0, max_length)
+            if cut < int(max_length * 0.6):
+                # Try single line break
+                cut = remaining.rfind("\n", 0, max_length)
+            if cut < int(max_length * 0.4):
+                # Try whitespace
+                cut = remaining.rfind(" ", 0, max_length)
+            if cut <= 0:
+                cut = max_length
+            chunks.append(remaining[:cut].rstrip())
+            remaining = remaining[cut:].lstrip()
+        return chunks
+    except Exception:
+        # Fallback: hard chunking
+        return [text[i:i+max_length] for i in range(0, len(text), max_length)]
+
 from typing import Mapping, cast
 
 def safe_get(data: Mapping[str, Any], *keys: str, default: Any = None) -> Any:
