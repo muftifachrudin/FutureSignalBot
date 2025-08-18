@@ -160,10 +160,14 @@ class PairsCache:
             return None
 
     async def get_scalp_snapshot(self, symbol: str) -> Optional[str]:
-        """Produce a concise scalping snapshot leveraging micro metrics and short-term sentiment.
-        Returns markdown string.
         """
-        # fetch latest 1m klines to update store
+        Improved: Only signal long/short if price is at strongest 1H/4H support/resistance.
+        - If at strongest resistance: signal short, TP to nearest/farthest support, SL above resistance/volatility.
+        - If at strongest support: signal long, TP to nearest/farthest resistance, SL below support/volatility.
+        - Else: signal wait.
+        Combines liquidity heatmap, funding, OI for entry/TP/SL logic.
+        """
+        # --- 1. Update micro metrics ---
         try:
             if self.mexc_client:
                 kl = await cast(Any, self.mexc_client).get_klines(symbol, '1m', limit=Config.ATR1M_PERIOD + 20)
@@ -173,16 +177,19 @@ class PairsCache:
             kl = []
         self._update_micro_metrics_from_1m(symbol, cast(List[List[Any]], kl or []))
 
-        atr1m = self._compute_atr1m(symbol)
-        vol_prof = self._compute_volume_profile(symbol)
-        # basic price/funding snapshot reuse core data function (cached inside call chain) for accuracy
+        # --- 2. Gather all market data ---
+        atr1m: float = self._compute_atr1m(symbol)
+        vol_prof: Optional[Dict[str, Any]] = self._compute_volume_profile(symbol)
         data = await self._get_reliable_market_data(symbol)
         ticker = cast(Dict[str, Any], data.get('mexc_ticker') or {})
         price = ticker.get('lastPrice')
-        change_pct = ticker.get('priceChangePercent')
+        try:
+            p = float(price) if price is not None else None
+        except Exception:
+            p = None
         cg_summary: Dict[str, Any] = cast(Dict[str, Any], data.get('coinglass_summary') or {})
-        funding = cg_summary.get('funding_rate')
-        oi_chg = cg_summary.get('oi_change_24h')
+        funding = float(cg_summary.get('funding_rate') or 0)
+        oi_chg = float(cg_summary.get('oi_change_24h') or 0)
         lsr = cg_summary.get('long_short_ratio')
         # Try fetch very short-term taker L/S ratio as extra context (5m or 15m)
         short_lsr: Optional[float] = None
@@ -197,37 +204,86 @@ class PairsCache:
                         break
         except Exception:
             short_lsr = None
-        # derive bias
-        try:
-            ch = float(change_pct or 0)
-            fr = float(funding or 0)
-            oi = float(oi_chg or 0)
-        except Exception:
-            ch = 0; fr = 0; oi = 0
-        bias = 'NETRAL'
-        if ch > 0.4 and fr >= 0 and oi > 0:
-            bias = 'BULLISH'
-        elif ch < -0.4 and fr <= 0 and oi < 0:
-            bias = 'BEARISH'
 
-        # risk sizing derived from 1m ATR
-        stop_pct = atr1m * 0.8 if atr1m else 0.15
-        tp_pct = stop_pct * (1.4 if bias in ('BULLISH', 'BEARISH') else 1.2)
-        # adjust for crowded ratio
-        try:
-            if lsr is not None:
-                lsr_f = float(lsr)
-                if lsr_f > 0.65 or lsr_f < 0.35:
-                    stop_pct *= 0.9
-                    tp_pct *= 1.05
-        except Exception:
-            pass
+        # --- 3. Find strongest S/R on 1H/4H ---
+        strongest_res: Optional[float] = None
+        strongest_sup: Optional[float] = None
+        tf_highs: List[float] = []
+        tf_lows: List[float] = []
+        for tf, win in [('1h', 24), ('4h', 12)]:
+            if not self.mexc_client:
+                kl_tf_any: Any = []
+            else:
+                try:
+                    kl_tf_any = await cast(Any, self.mexc_client).get_klines(symbol, tf, limit=max(win * 2, 60))
+                except Exception:
+                    kl_tf_any = []
+            # Ensure shapes and types
+            kl_tf_list: List[List[Any]] = cast(List[List[Any]], kl_tf_any or [])
+            highs_tf_local: List[float] = [float(k[2]) for k in kl_tf_list if len(k) > 3]
+            lows_tf_local: List[float] = [float(k[3]) for k in kl_tf_list if len(k) > 3]
+            if highs_tf_local:
+                tf_highs.extend(highs_tf_local[-win:])
+            if lows_tf_local:
+                tf_lows.extend(lows_tf_local[-win:])
+        if tf_highs:
+            strongest_res = max(tf_highs)
+        if tf_lows:
+            strongest_sup = min(tf_lows)
 
+        # --- 4. Determine if price is at/near strongest S/R ---
+        sr_threshold: float = 0.0015  # 0.15% proximity threshold (configurable)
+        at_res: bool = False
+        at_sup: bool = False
+        if isinstance(p, (int, float)) and p and strongest_res is not None:
+            at_res = abs(p - strongest_res) / p < sr_threshold
+        if isinstance(p, (int, float)) and p and strongest_sup is not None:
+            at_sup = abs(p - strongest_sup) / p < sr_threshold
+
+        # --- 5. Combine with liquidity heatmap, funding, OI for entry logic ---
+        # (For now, use funding, OI, and short-term L/S as proxy for liquidity heatmap)
+        bias: str = 'WAIT'
+        reason: str = ""
+        tp: Optional[float] = None
+        sl: Optional[float] = None
+        if at_res:
+            # At resistance: consider short
+            if funding < 0 and oi_chg < 0:
+                bias = 'SHORT'
+                reason = f"Harga di resisten terkuat ({strongest_res:.2f}), funding negatif, OI turun."
+            else:
+                bias = 'WAIT'
+                reason = f"Harga di resisten, tapi funding/OI tidak mendukung short."
+            # TP: nearest/farthest support, SL: above resistance/volatility
+            if bias == 'SHORT' and strongest_sup is not None and strongest_res is not None:
+                tp = strongest_sup
+                sl = strongest_res * (1 + max(0.002, atr1m/100))
+        elif at_sup:
+            # At support: consider long
+            if funding > 0 and oi_chg > 0:
+                bias = 'LONG'
+                reason = f"Harga di support terkuat ({strongest_sup:.2f}), funding positif, OI naik."
+            else:
+                bias = 'WAIT'
+                reason = f"Harga di support, tapi funding/OI tidak mendukung long."
+            # TP: nearest/farthest resistance, SL: below support/volatility
+            if bias == 'LONG' and strongest_res is not None and strongest_sup is not None:
+                tp = strongest_res
+                sl = strongest_sup * (1 - max(0.002, atr1m/100))
+        else:
+            bias = 'WAIT'
+            reason = "Harga tidak berada di area support/resisten utama."
+
+        # --- 6. Format output ---
         lines: List[str] = []
-        lines.append(f"🎯 *Scalp {symbol}* | Bias: {bias}")
+        lines.append(f"🎯 *Scalp {symbol}* | Sinyal: {bias}")
         if price:
-            lines.append(f"Harga: {price} ({(float(change_pct) if change_pct else 0):+.2f}%)")
-        lines.append(f"Funding: {float(funding or 0):.4f} | OI 24j: {float(oi_chg or 0):+.2f}%")
+            lines.append(f"Harga: {price}")
+        if strongest_res:
+            lines.append(f"Resisten terkuat (1H/4H): {strongest_res:.2f}")
+        if strongest_sup:
+            lines.append(f"Support terkuat (1H/4H): {strongest_sup:.2f}")
+        lines.append(f"Funding: {funding:.4f} | OI 24j: {oi_chg:+.2f}%")
         if lsr is not None:
             try:
                 lines.append(f"Long/Short: {float(lsr):.2f}")
@@ -236,196 +292,16 @@ class PairsCache:
         if short_lsr is not None:
             lines.append(f"LS (5-15m): {short_lsr:.2f}")
         lines.append(f"ATR 1m({Config.ATR1M_PERIOD}): {atr1m:.2f}%")
-
-        # Absolute TP/SL suggestion when price known
-        abs_levels: List[str] = []
+        # Lightly surface POC from volume profile to avoid unused variable and add context
         try:
-            p = float(price) if price is not None else None
-        except Exception:
-            p = None
-        if p and p > 0:
-            if bias == 'BULLISH':
-                sl = p * (1 - stop_pct / 100)
-                tp1 = p * (1 + tp_pct / 100)
-            elif bias == 'BEARISH':
-                sl = p * (1 + stop_pct / 100)
-                tp1 = p * (1 - tp_pct / 100)
-            else:
-                sl = p * (1 - stop_pct / 100)
-                tp1 = p * (1 + tp_pct / 100)
-            abs_levels.append(f"SL≈ {sl:.4f}")
-            abs_levels.append(f"TP≈ {tp1:.4f}")
-        lines.append(
-            f"Stop≈ {stop_pct:.2f}% | TP≈ {tp_pct:.2f}% (R~1:{(tp_pct / stop_pct):.2f})" + (" | " + " ".join(abs_levels) if abs_levels else "")
-        )
-
-        if vol_prof:
-            try:
-                poc = vol_prof.get('poc')
-                hvn = vol_prof.get('hvn')
-                lvn = vol_prof.get('lvn')
-                # S/R estimation from volume profile proximity
-                if isinstance(p, float) and p > 0 and isinstance(poc, (int, float)):
-                    # nearest HVN/LVN
-                    def nearest(levels: List[float]) -> Optional[float]:
-                        if not levels:
-                            return None
-                        try:
-                            return sorted(levels, key=lambda x: abs(x - p))[0]
-                        except Exception:
-                            return None
-
-                    n_hvn = nearest(cast(List[float], hvn or []))
-                    n_lvn = nearest(cast(List[float], lvn or []))
-                    sr_parts: List[str] = []
-                    if n_hvn:
-                        sr_parts.append(f"Res≈ {n_hvn:.2f}")
-                    if n_lvn:
-                        sr_parts.append(f"Sup≈ {n_lvn:.2f}")
-                    if sr_parts:
-                        lines.append("S/R: " + ", ".join(sr_parts))
-                if isinstance(poc, (int, float)):
-                    lines.append(f"POC: {poc:.2f}")
-                if hvn:
-                    lines.append("HVN: " + ", ".join(f"{v:.2f}" for v in cast(List[float], hvn)))
-                if lvn:
-                    lines.append("LVN: " + ", ".join(f"{v:.2f}" for v in cast(List[float], lvn)))
-            except Exception:
-                pass
-        # --- Multi-TF swing S/R (5m, 15m, 1h, 4h) ---
-        try:
-            if self.mexc_client:
-                tf_windows: Dict[str, int] = {'5m': 20, '15m': 20, '1h': 12, '4h': 6}
-                swings: Dict[str, Dict[str, float]] = {}
-                # Collect touch levels per TF for clustering
-                tf_levels_sup: List[Tuple[float, float]] = []  # (level, weight)
-                tf_levels_res: List[Tuple[float, float]] = []
-                tf_w = {'5m': 1.0, '15m': 1.2, '1h': 1.5, '4h': 1.8}
-
-                def cluster_levels(values: List[float], tol_abs: float) -> List[Tuple[float, int]]:
-                    if not values:
-                        return []
-                    vs = sorted(values)
-                    clusters: List[List[float]] = []
-                    current: List[float] = [vs[0]]
-                    for v in vs[1:]:
-                        c_center = sum(current) / len(current)
-                        if abs(v - c_center) <= tol_abs:
-                            current.append(v)
-                        else:
-                            clusters.append(current)
-                            current = [v]
-                    if current:
-                        clusters.append(current)
-                    result: List[Tuple[float, int]] = []
-                    for cl in clusters:
-                        center = sum(cl) / len(cl)
-                        result.append((center, len(cl)))
-                    return result
-                for tf, win in tf_windows.items():
-                    try:
-                        kl_tf = await cast(Any, self.mexc_client).get_klines(symbol, tf, limit=max(win * 3, 60))
-                    except Exception:
-                        kl_tf = []
-                    highs_tf: List[float] = []
-                    lows_tf: List[float] = []
-                    for k in cast(List[List[Any]], kl_tf or []):
-                        try:
-                            highs_tf.append(float(k[2]))
-                            lows_tf.append(float(k[3]))
-                        except Exception:
-                            continue
-                    if len(highs_tf) >= win and len(lows_tf) >= win:
-                        sh = max(highs_tf[-win:])
-                        slw = min(lows_tf[-win:])
-                        swings[tf] = {'high': sh, 'low': slw}
-                        # Also build clustered touch levels for this TF
-                        tol = (p * 0.002) if p else (sum(highs_tf[-win:]) / max(1, win) * 0.002)
-                        for lvl, cnt in cluster_levels(highs_tf[-win:], tol):
-                            tf_levels_res.append((lvl, cnt * tf_w.get(tf, 1.0)))
-                        for lvl, cnt in cluster_levels(lows_tf[-win:], tol):
-                            tf_levels_sup.append((lvl, cnt * tf_w.get(tf, 1.0)))
-                # Determine nearest levels relative to current price
-                if p and p > 0 and swings:
-                    above: List[Tuple[str, float, float]] = []  # (tf, level, diff)
-                    below: List[Tuple[str, float, float]] = []
-                    for tf, lv in swings.items():
-                        try:
-                            sh = float(lv.get('high', 0))
-                            slw = float(lv.get('low', 0))
-                        except Exception:
-                            continue
-                        if sh > p:
-                            above.append((tf, sh, sh - p))
-                        if slw < p:
-                            below.append((tf, slw, p - slw))
-                    nearest_res = None
-                    nearest_sup = None
-                    if above:
-                        nearest_res = sorted(above, key=lambda x: x[2])[0]
-                    if below:
-                        nearest_sup = sorted(below, key=lambda x: x[2])[0]
-                    sr_tf_parts: List[str] = []
-                    if nearest_sup:
-                        sr_tf_parts.append(f"Sup≈ {nearest_sup[1]:.2f} ({nearest_sup[0]})")
-                    if nearest_res:
-                        sr_tf_parts.append(f"Res≈ {nearest_res[1]:.2f} ({nearest_res[0]})")
-                    if sr_tf_parts:
-                        lines.append("S/R (TF): " + ", ".join(sr_tf_parts))
-                # Merge clustered TF levels across TFs and rank by touches and proximity
-                if p and p > 0 and (tf_levels_sup or tf_levels_res):
-                    def merge_levels(levels: List[Tuple[float, float]], tol_abs: float) -> List[Tuple[float, float]]:
-                        if not levels:
-                            return []
-                        levels_sorted = sorted(levels, key=lambda x: x[0])
-                        merged: List[Tuple[float, float]] = []  # (center, weight)
-                        cur_center, cur_weight = levels_sorted[0]
-                        count = 1
-                        for lvl, w in levels_sorted[1:]:
-                            if abs(lvl - cur_center) <= tol_abs:
-                                # update center as running average weighted by touches weight
-                                total_w = cur_weight + w
-                                if total_w > 0:
-                                    cur_center = (cur_center * cur_weight + lvl * w) / total_w
-                                    cur_weight = total_w
-                                else:
-                                    cur_weight += w
-                                count += 1
-                            else:
-                                merged.append((cur_center, cur_weight))
-                                cur_center, cur_weight = lvl, w
-                                count = 1
-                        merged.append((cur_center, cur_weight))
-                        return merged
-
-                    tol_cross = p * 0.002
-                    sup_merged = merge_levels(tf_levels_sup, tol_cross)
-                    res_merged = merge_levels(tf_levels_res, tol_cross)
-
-                    def rank_levels(levels: List[Tuple[float, float]], take: int, side: str) -> List[float]:
-                        scored: List[Tuple[float, float]] = []  # (score, level)
-                        for lvl, w in levels:
-                            if (side == 'sup' and lvl >= p) or (side == 'res' and lvl <= p):
-                                continue
-                            dd = abs(lvl - p) / p
-                            proximity = 1.0 / (dd + 1e-4)
-                            score = w + proximity
-                            scored.append((score, lvl))
-                        scored_sorted = sorted(scored, key=lambda x: x[0], reverse=True)
-                        return [lvl for _, lvl in scored_sorted[:take]]
-
-                    sup_top = rank_levels(sup_merged, 3, 'sup')
-                    res_top = rank_levels(res_merged, 3, 'res')
-                    if sup_top or res_top:
-                        parts_sr: List[str] = []
-                        if sup_top:
-                            parts_sr.append("Sup: " + ", ".join(f"{v:.2f}" for v in sup_top))
-                        if res_top:
-                            parts_sr.append("Res: " + ", ".join(f"{v:.2f}" for v in res_top))
-                        lines.append("S/R (Multi-TF): " + " | ".join(parts_sr))
+            if vol_prof and isinstance(vol_prof.get('poc'), (int, float)):
+                lines.append(f"POC (1m VP): {float(vol_prof['poc']):.2f}")
         except Exception:
             pass
-        lines.append("Catatan: Gunakan konfirmasi momentum 1-5m & order book.")
+        lines.append(reason)
+        if bias in ('LONG', 'SHORT') and tp and sl:
+            lines.append(f"TP: {tp:.2f} | SL: {sl:.2f}")
+        lines.append("Catatan: Sinyal hanya muncul jika harga di area support/resisten utama (1H/4H) dan didukung funding & OI. TP/SL otomatis dari level S/R & volatilitas.")
         snapshot = "\n".join(lines)
         if len(snapshot) > Config.SCALP_MAX_MESSAGE_LEN:
             snapshot = snapshot[: Config.SCALP_MAX_MESSAGE_LEN]
